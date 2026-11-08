@@ -1,6 +1,6 @@
 # WeaveClaw 创作 Agent
 
-本项目是 WeaveClaw 的独立关联项目。当前阶段只验证 Pi 在 Electron utilityProcess 中的运行与工具执行边界，尚未接入 WeaveClaw 的模型、任务或项目数据。
+本项目是 WeaveClaw 的独立关联项目。当前阶段包含 Pi 轮次适配原型，并验证 Pi 在 Electron utilityProcess 中运行。原型通过注入的宿主接口请求模型与工具，尚未接入 WeaveClaw 的真实模型、任务或项目数据。
 
 首期产品和流程规则见 [创作流程规则](docs/creation-workflow.md)。
 
