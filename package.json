@@ -1,0 +1,19 @@
+{
+  "name": "weaveclaw-creative-agent",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "WeaveClaw 本地创作 Agent",
+  "scripts": {
+    "test": "node --test test/*.test.mjs",
+    "test:electron": "node test/run-electron-gate.cjs"
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "dependencies": {
+    "@earendil-works/pi-agent-core": "1.5.0",
+    "@earendil-works/pi-ai": "1.5.0",
+    "@earendil-works/pi-schema": "1.5.0"
+  }
+}
