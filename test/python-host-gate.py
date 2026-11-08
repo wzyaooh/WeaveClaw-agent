@@ -14,10 +14,11 @@ from novelvideo.api.routes.desktop_orchestrator import router
 from novelvideo.chat.orchestrator_link import OrchestratorLink
 from novelvideo.chat.orchestrator_runtime import OrchestratorRuntime
 
-NODE = os.environ.get('WEAVECLAW_TEST_NODE') or shutil.which('node')
-CLIENT = str(Path(__file__).with_name('python-host-client.mjs'))
+ELECTRON = os.environ.get('WEAVECLAW_TEST_ELECTRON')
+NODE = ELECTRON or os.environ.get('WEAVECLAW_TEST_NODE') or shutil.which('node')
+CLIENT = str(Path(__file__).with_name('electron-python-host.cjs' if ELECTRON else 'python-host-client.mjs'))
 if not NODE:
-    raise RuntimeError('Node.js is required for this development test')
+    raise RuntimeError('Node.js or Electron is required for this development test')
 
 class Model:
     profile = SimpleNamespace(supports_tools=True)
@@ -55,25 +56,43 @@ async def main():
                 raise RuntimeError("Python test server failed to start")
             await asyncio.sleep(0.01)
     child_env = {key: value for key, value in os.environ.items() if not key.upper().startswith("WEAVECLAW_")}
+    if ELECTRON:
+        child_env["PI_TEST_CONFIG"] = json.dumps({"url": f"ws://127.0.0.1:{port}/api/v1/desktop/orchestrator/ws", "token": token})
     child = await asyncio.create_subprocess_exec(NODE, CLIENT, stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, env=child_env)
     try:
-        child.stdin.write((json.dumps({'url': f'ws://127.0.0.1:{port}/api/v1/desktop/orchestrator/ws', 'token': token}) + '\n').encode())
-        await child.stdin.drain()
-        assert (await asyncio.wait_for(child.stdout.readline(), 10)) == b'READY\n'
+        if not ELECTRON:
+            child.stdin.write((json.dumps({'url': f'ws://127.0.0.1:{port}/api/v1/desktop/orchestrator/ws', 'token': token}) + '\n').encode())
+            await child.stdin.drain()
+        async with asyncio.timeout(10):
+            while True:
+                line = await child.stdout.readline()
+                if line.strip() == b'READY':
+                    break
+                if not line:
+                    raise RuntimeError('test process failed to start')
         dispatcher, model = Dispatcher(), Model()
         result = await asyncio.wait_for(OrchestratorRuntime(link=app.state.orchestrator_link, model=model,
                                                            dispatcher=dispatcher, stream=False).run('private prompt'), 10)
         assert result.write_attempted and model.calls == 1 and dispatcher.calls == [('write', {'private': 0.0})]
         print('Python–Pi local WebSocket: verified one host-owned write')
     finally:
+        if ELECTRON:
+            server.should_exit = True
+            await task
         if child.returncode is None:
             try:
+                if ELECTRON:
+                    await asyncio.wait_for(child.wait(), 5)
+                else:
+                    child.terminate()
+            except asyncio.TimeoutError:
                 child.terminate()
             except ProcessLookupError:
                 pass
         await child.wait()
         server.should_exit = True
         await task
+
 
 asyncio.run(main())

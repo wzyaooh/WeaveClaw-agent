@@ -19,8 +19,9 @@ function parseFrame(data, binary, expected) {
   return frame;
 }
 
-function endpoint(url, token) {
-  const value = new URL(url);
+export function validateEndpoint(url, token) {
+  let value;
+  try { value = new URL(url); } catch { throw new Error("invalid_local_endpoint"); }
   if (value.protocol !== "ws:" || value.hostname !== "127.0.0.1" || !value.port ||
       value.pathname !== "/api/v1/desktop/orchestrator/ws" || value.search || value.hash ||
       value.username || value.password || typeof token !== "string" || token.length < 32 ||
@@ -33,7 +34,7 @@ function endpoint(url, token) {
  * the caller explicitly closes the connection. These are non-sensitive codes.
  */
 export async function connectHost({ url, token }) {
-  const socket = new WebSocket(endpoint(url, token), {
+  const socket = new WebSocket(validateEndpoint(url, token), {
     headers: { "x-weaveclaw-orchestrator-token": token },
     handshakeTimeout: 10_000, maxPayload: MAX_BYTES, perMessageDeflate: false,
   });
