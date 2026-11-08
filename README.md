@@ -2,6 +2,8 @@
 
 本项目是 WeaveClaw 的独立关联项目。当前阶段只验证 Pi 在 Electron utilityProcess 中的运行与工具执行边界，尚未接入 WeaveClaw 的模型、任务或项目数据。
 
+首期产品和流程规则见 [创作流程规则](docs/creation-workflow.md)。
+
 安装依赖并运行不调用真实模型的验证：
 
 ```powershell
