@@ -13,11 +13,13 @@ function assistant(content, stopReason, errorMessage) {
     stopReason, timestamp: Date.now(), ...(errorMessage ? { errorMessage } : {}) };
 }
 
-function contentFromHost(parts, allowed) {
+export function contentFromHost(parts, allowed) {
+  if (allowed === undefined) throw new TypeError("allowlist_required");
   if (!Array.isArray(parts)) throw new Error("invalid_model_result");
   return parts.map((part) => {
-    if (part?.type === "tool_call" && typeof part.id === "string" && part.id &&
-        typeof part.name === "string" && allowed.has(part.name) && part.arguments &&
+    if (part?.type === "tool_call" && Object.keys(part).sort().join(",") === "arguments,id,name,type" &&
+        typeof part.id === "string" && part.id && typeof part.name === "string" &&
+        (!allowed || allowed.has(part.name)) && part.arguments &&
         typeof part.arguments === "object" && !Array.isArray(part.arguments) && Object.keys(part.arguments).length === 0) {
       return { type: "toolCall", id: part.id, name: part.name, arguments: part.arguments };
     }

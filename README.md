@@ -24,5 +24,15 @@ Pi 依赖还包含多个模型供应商 SDK；依赖裁剪、安装包大小与 
 2026-11-09 本机 Electron 门禁输出：
 
 ```json
-{"ok":true,"node":"22.22.0","checks":["single_write","complete_before_tool","multiple_writes_blocked","truncated_response_blocked","cancelled_during_stream"],"electron":"38.8.6"}
+{"ok":true,"node":"22.22.0","checks":["single_write","complete_before_tool","multiple_writes_blocked","truncated_response_blocked","cancelled_during_stream","host_owned_turn"],"electron":"38.8.6"}
+{"ok":true,"electron":"38.8.6","checks":["local_socket","host_owned_write"]}
 ```
+
+
+与 WeaveClaw 主仓库开发环境联调（需要该仓库的 Python 依赖；使用模拟模型和业务写入，不调用真实模型）：
+
+```powershell
+E:\WeaveClaw\.venv\Scripts\python.exe test/python-host-gate.py
+```
+
+此验证通过真实本地 WebSocket 连接独立 Node 进程和 Python 协议、认证及宿主编排原型；尚不验证 Electron 打包或真实业务流程。Python 导入时可能生成本地 `runtime/` 日志目录，该目录不纳入版本控制。
