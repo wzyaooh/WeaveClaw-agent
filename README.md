@@ -31,7 +31,7 @@ Pi 依赖还包含多个模型供应商 SDK；依赖裁剪、安装包大小与 
 ```
 
 
-与 WeaveClaw 主仓库开发环境联调（需要该仓库的 Python 依赖；使用模拟模型和业务写入，不调用真实模型）：
+与 WeaveClaw 主仓库开发环境联调（主仓库需包含 `35e2ca47` 的模型执行器和 `6903a930` 的进程令牌契约；需要该仓库的 Python 依赖；使用模拟模型和业务写入，不调用真实模型）：
 
 ```powershell
 E:\WeaveClaw\.venv\Scripts\python.exe test/python-host-gate.py

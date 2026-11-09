@@ -44,9 +44,9 @@ async def main():
     port = sock.getsockname()[1]
     token = 'orchestrator-test-token-' * 3
     os.environ['WEAVECLAW_API_PORT'] = str(port)
-    os.environ['WEAVECLAW_ORCHESTRATOR_TOKEN'] = token
     os.environ['WEAVECLAW_DESKTOP_TOKEN'] = 'desktop-proof-' * 4
     app = FastAPI(); app.state.desktop_mode = True; app.state.orchestrator_link = OrchestratorLink()
+    app.state.orchestrator_token = token
     app.include_router(router, prefix='/api/v1')
     server = uvicorn.Server(uvicorn.Config(app, log_level='error', lifespan='off'))
     task = asyncio.create_task(server.serve(sockets=[sock]))
