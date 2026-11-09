@@ -43,6 +43,7 @@ async function pair() {
       });
     },
     send(type, turn_id, request_id, payload = {}) {
+      if (type === "turn.start") payload = { limits: { max_model_calls: 4, max_tool_calls_per_response: 6 }, ...payload };
       peer.send(JSON.stringify({ version: 2, type, sequence: ++sequence, turn_id, request_id, payload }));
     },
     async close() { connection.close(); await new Promise((resolve) => server.close(resolve)); },
@@ -59,7 +60,7 @@ test("real local socket runs one verified write", { timeout: 10_000 }, async () 
     assert.equal(accepted.request_id, "start-1");
     assert.equal(model.type, "model.call");
     assert.equal(accepted.payload.strategy.id, "creation-v1");
-    assert.deepEqual(model.payload, { context: [{ ref: "prompt" }] });
+    assert.deepEqual(model.payload, { context: [{ ref: "prompt" }], tools: ["write"], plan: null });
     p.send("model.result", "attempt-1", model.request_id,
       { parts: [{ type: "tool_call", id: "call-1", name: "write", arguments: {} }] });
     const call = await p.next();

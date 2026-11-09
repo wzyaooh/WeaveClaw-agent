@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Agent } from "@earendil-works/pi-agent-core";
-import { createTurn, validToolResult } from "../src/turn.mjs";
+import { createTurn as rawCreateTurn, validToolResult } from "../src/turn.mjs";
+
+const limits = { max_model_calls: 4, max_tool_calls_per_response: 6 };
+const createTurn = (input) => rawCreateTurn({ limits, ...input });
 
 const tool = { name: "read_project", description: "查看项目", parameters: { type: "object", properties: {}, additionalProperties: false } };
 const write = { ...tool, name: "write_project" };
@@ -21,12 +24,56 @@ function mockHost(replies) {
 const model = (...parts) => ({ kind: "model.call", value: { parts } });
 const result = (final = false) => ({ kind: "tool.call", value: { final, ok: true, result: { ok: true } } });
 
+test("turn reads target progress before showing the eligible creative write", async () => {
+  const episodeSchema = { type: "object", properties: { episode: { type: "integer" } }, required: ["episode"], additionalProperties: false };
+  const progress = { ...tool, name: "dramaclaw_get_creation_progress", parameters: episodeSchema };
+  const script = { ...progress, name: "dramaclaw_generate_script" };
+  const requests = [];
+  const host = { async request(kind, payload) {
+    requests.push({ kind, payload });
+    if (kind === "tool.call" && payload.name === progress.name) return { ok: true, final: false, result: { ok: true, data: {
+      version: 1, source: { uploads: 1, imported: true }, project: { characters: 1, episodes: 1 },
+      episode: { number: 1, exists: true, identity_planned: true, beats: 0, all_beats_have_content: false,
+        sketches_missing: 0, sketches_stale: 0, identity_detected: 0, first_frames_present: 0 }, active_steps: [],
+    } } };
+    if (kind === "tool.call") return { ok: true, final: true, result: { ok: true } };
+    if (requests.length === 1) return { parts: [{ ...call(progress.name), arguments: { episode: 1 } }] };
+    return { parts: [{ ...call(script.name), id: "write-1", arguments: { episode: 1 } }] };
+  } };
+  const output = await createTurn({ scope: "project", prompt: "生成第一集剧本", history: [], tools: [progress, script], host }).run();
+  assert.equal(output.error, undefined);
+  assert.deepEqual(requests[0].payload.tools, [progress.name]);
+  assert.deepEqual(requests[2].payload.tools, [progress.name, script.name]);
+  assert.deepEqual(requests[2].payload.plan, { episode: 1, next_tool: script.name, reason: "script_required" });
+  assert.equal(requests[3].payload.name, script.name);
+});
+
+test("progress for one episode cannot authorize a different episode", async () => {
+  const schema = { type: "object", properties: { episode: { type: "integer" } }, required: ["episode"], additionalProperties: false };
+  const progress = { ...tool, name: "dramaclaw_get_creation_progress", parameters: schema };
+  const script = { ...progress, name: "dramaclaw_generate_script" };
+  const requests = [];
+  const host = { async request(kind, payload) {
+    requests.push({ kind, payload });
+    if (kind === "tool.call") return { ok: true, final: false, result: { ok: true, data: {
+      version: 1, source: { uploads: 1, imported: true }, project: { characters: 1, episodes: 2 },
+      episode: { number: 1, exists: true, identity_planned: true, beats: 0, all_beats_have_content: false,
+        sketches_missing: 0, sketches_stale: 0, identity_detected: 0, first_frames_present: 0 }, active_steps: [],
+    } } };
+    return requests.length === 1 ? { parts: [{ ...call(progress.name), arguments: { episode: 1 } }] }
+      : { parts: [{ ...call(script.name), id: "wrong-episode", arguments: { episode: 2 } }] };
+  } };
+  const output = await createTurn({ scope: "project", prompt: "生成剧本", history: [], tools: [progress, script], host }).run();
+  assert.equal(output.error, "host_model_failed");
+  assert.deepEqual(requests.map((item) => item.kind), ["model.call", "tool.call", "model.call"]);
+});
+
 test("Pi asks the host for model and tool work and stops after a write", async () => {
   const host = mockHost([model(call("write_project")), result(true)]);
   const turn = createTurn({ scope: "project", prompt: "当前创作目标", history: [], tools: [write], host });
   assert.deepEqual(await turn.run(), { aborted: false, error: undefined });
   assert.deepEqual(host.requests, [
-    { kind: "model.call", payload: { context: [{ ref: "prompt" }] } },
+    { kind: "model.call", payload: { context: [{ ref: "prompt" }], tools: ["write_project"], plan: null } },
     { kind: "tool.call", payload: { tool_call_id: "tool-1", name: "write_project", arguments: {} } },
   ]);
   await assert.rejects(turn.run(), /turn_already_used/);
@@ -38,7 +85,7 @@ test("Pi returns a read result to the host before the next model call", async ()
   assert.equal(output.error, undefined);
   assert.deepEqual(host.requests.map((item) => item.kind), ["model.call", "tool.call", "model.call"]);
   assert.deepEqual(host.requests[2].payload, { context: [{ ref: "prompt" }, { ref: "response", index: 1 },
-    { ref: "tool", response: 1, id: "tool-1" }] });
+    { ref: "tool", response: 1, id: "tool-1" }], tools: ["read_project"], plan: null });
 });
 
 test("Pi keeps repeated tool IDs distinct across response rounds", async () => {
@@ -47,7 +94,7 @@ test("Pi keeps repeated tool IDs distinct across response rounds", async () => {
   assert.equal(output.error, undefined);
   assert.deepEqual(host.requests[4].payload, { context: [{ ref: "prompt" },
     { ref: "response", index: 1 }, { ref: "tool", response: 1, id: "tool-1" },
-    { ref: "response", index: 2 }, { ref: "tool", response: 2, id: "tool-1" }] });
+    { ref: "response", index: 2 }, { ref: "tool", response: 2, id: "tool-1" }], tools: ["read_project"], plan: null });
 });
 
 test("Pi projects every acknowledged tool in a complete batch", async () => {
@@ -56,7 +103,7 @@ test("Pi projects every acknowledged tool in a complete batch", async () => {
   const output = await createTurn({ scope: "project", prompt: "目标", history: [], tools: [tool], host }).run();
   assert.equal(output.error, undefined);
   assert.deepEqual(host.requests[3].payload, { context: [{ ref: "prompt" }, { ref: "response", index: 1 },
-    { ref: "tool", response: 1, id: "tool-1" }, { ref: "tool", response: 1, id: "tool-2" }] });
+    { ref: "tool", response: 1, id: "tool-1" }, { ref: "tool", response: 1, id: "tool-2" }], tools: ["read_project"], plan: null });
 });
 
 test("a failed model or tool request stops without another host call", async () => {
@@ -196,7 +243,7 @@ test("Pi receives the bounded host conversation and current creative goal", asyn
       { role: "user", text: "先检查素材" }, { role: "assistant", text: "已检查" },
     ] });
     assert.deepEqual(host.requests[0].payload, { context: [{ ref: "history", index: 0 },
-      { ref: "history", index: 1 }, { ref: "prompt" }] });
+      { ref: "history", index: 1 }, { ref: "prompt" }], tools: [], plan: null });
   } finally { Agent.prototype.prompt = originalPrompt; }
 });
 
@@ -247,7 +294,7 @@ test("Pi uses host model text, validated tool arguments and read results in its 
     const output = await createTurn({ scope: "project", prompt: "检查第一集", history: [], tools: [{ ...tool, parameters: schema }], host }).run();
     assert.equal(output.error, undefined);
     assert.deepEqual(calls[2].payload, { context: [{ ref: "prompt" }, { ref: "response", index: 1 },
-      { ref: "tool", response: 1, id: "read-1" }] });
+      { ref: "tool", response: 1, id: "read-1" }], tools: ["read_project"], plan: null });
     assert.ok(!JSON.stringify(calls[2].payload).includes("第一集"));
     assert.deepEqual(calls[1], { kind: "tool.call", payload: { tool_call_id: "read-1", name: "read_project", arguments: { episode: 2 } } });
     assert.ok(JSON.stringify(seenContext).includes("第一集"));

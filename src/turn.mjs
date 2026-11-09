@@ -6,6 +6,7 @@ import { isDeepStrictEqual } from "node:util";
 import { createAssistantMessageEventStream, validateToolArguments } from "@earendil-works/pi-ai";
 import { createProjection } from "./context.mjs";
 import { selectStrategy } from "./strategy.mjs";
+import { createWorkflow } from "./workflow.mjs";
 
 const MAX_PROMPT_CHARS = 24_000;
 const MAX_HISTORY_MESSAGES = 40;
@@ -101,10 +102,10 @@ export function validToolResult(value) {
  * Each pending request receives its own abort signal, detached on settlement.
  */
 export function createTurn(input) {
-  if (!input || typeof input !== "object" || Object.keys(input).sort().join(",") !== "history,host,prompt,scope,tools") {
+  if (!input || typeof input !== "object" || Object.keys(input).sort().join(",") !== "history,host,limits,prompt,scope,tools") {
     throw new TypeError("invalid_turn_start");
   }
-  const { tools, host, prompt, history, scope } = input;
+  const { tools, host, prompt, history, scope, limits } = input;
   if (typeof prompt !== "string" || !prompt || codePointCountWithin(prompt, MAX_PROMPT_CHARS) < 0 ||
       !Array.isArray(history) || history.length > MAX_HISTORY_MESSAGES) {
     throw new TypeError("invalid_turn_context");
@@ -121,6 +122,12 @@ export function createTurn(input) {
     remaining -= count;
   }
   if (!Array.isArray(tools) || typeof host?.request !== "function" || !["home", "project"].includes(scope)) {
+    throw new TypeError("invalid_turn_start");
+  }
+  if (!limits || typeof limits !== "object" || Array.isArray(limits) ||
+      Object.keys(limits).sort().join(",") !== "max_model_calls,max_tool_calls_per_response" ||
+      !Number.isSafeInteger(limits.max_model_calls) || limits.max_model_calls < 1 || limits.max_model_calls > 100 ||
+      !Number.isSafeInteger(limits.max_tool_calls_per_response) || limits.max_tool_calls_per_response < 1 || limits.max_tool_calls_per_response > 100) {
     throw new TypeError("invalid_turn_start");
   }
   let finished = false;
@@ -172,6 +179,7 @@ export function createTurn(input) {
           const value = await request("tool.call", { tool_call_id: id, name: tool.name, arguments: original.arguments }, signal);
           if (!validToolResult(value)) throw new Error("invalid_tool_result");
           projection.recordToolResult(id, tool.name, value);
+          workflow.observe(tool.name, original.arguments, value);
           if (value.final) {
             finished = true;
             agent.abort();
@@ -186,6 +194,7 @@ export function createTurn(input) {
       },
     };
   });
+  const workflow = createWorkflow([...names]);
   const streamFn = (_model, context, options) => {
     const stream = createAssistantMessageEventStream();
     const signal = options.signal;
@@ -194,15 +203,16 @@ export function createTurn(input) {
     Promise.resolve().then(async () => {
       try {
         if (signal?.aborted) throw new Error("aborted");
-        const result = await request("model.call", { context: projection.project(context.messages) }, signal);
+        const proposal = workflow.plan();
+        const result = await request("model.call", { context: projection.project(context.messages), ...proposal }, signal);
         if (signal?.aborted) throw new Error("aborted");
-        const content = contentFromHost(result?.parts, names);
+        const content = contentFromHost(result?.parts, new Set(proposal.tools));
         // Reject invalid, duplicated or SDK-coerced calls before the first tool.
         const batch = new Map();
         for (const part of content) {
           if (part.type !== "toolCall") continue;
           const tool = mappedTools.find((item) => item.name === part.name);
-          if (batch.has(part.id) || !safeNumbers(part.arguments) || !validators.get(part.name).check(part.arguments) ||
+          if (batch.has(part.id) || !workflow.allows(part.name, part.arguments) || !safeNumbers(part.arguments) || !validators.get(part.name).check(part.arguments) ||
               !isDeepStrictEqual(validateToolArguments(tool, part), part.arguments)) {
             throw new Error("invalid_tool_arguments");
           }

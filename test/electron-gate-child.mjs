@@ -11,7 +11,7 @@ try {
     return kind === "model.call" ? { parts: [{ type: "tool_call", id: "one", name: "write", arguments: {} }] }
       : { final: true, ok: true, result: { ok: true } };
   } };
-  const turn = await createTurn({ scope: "project", prompt: "当前创作目标", history: [], tools: [tool], host }).run();
+  const turn = await createTurn({ scope: "project", prompt: "当前创作目标", history: [], tools: [tool], limits: { max_model_calls: 4, max_tool_calls_per_response: 6 }, host }).run();
   if (turn.error || requests.join(",") !== "model.call,tool.call") throw new Error("Pi 轮次适配验证失败");
   result.checks.push("host_owned_turn");
   process.parentPort.on("message", () => process.exit(0));

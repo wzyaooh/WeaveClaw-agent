@@ -30,11 +30,14 @@ class Model:
         assert 'host controls identity' in messages[0].parts[0].content
         assert messages[1].parts[0].content == 'previous user message'
         if self.calls == 1:
-            return ModelResponse(parts=[TextPart('先读取素材'), ToolCallPart('read', {'episode': 2}, 'read-1')],
+            assert 'dramaclaw_generate_script' not in {item.name for item in parameters.function_tools}
+            return ModelResponse(parts=[TextPart('先读取素材'), ToolCallPart('dramaclaw_get_creation_progress', {'episode': 2}, 'read-1')],
                                  finish_reason='tool_call', model_name='mock')
-        assert any(isinstance(part, ToolReturnPart) and part.content['data']['title'] == '第一集'
+        assert 'dramaclaw_generate_script' in {item.name for item in parameters.function_tools}
+        assert 'reason=script_required' in messages[0].parts[0].content
+        assert any(isinstance(part, ToolReturnPart) and part.content['data']['episode']['number'] == 2
                    for message in messages for part in message.parts)
-        return ModelResponse(parts=[ToolCallPart('write', {'private': 0.0}, 'call-1')],
+        return ModelResponse(parts=[ToolCallPart('dramaclaw_generate_script', {'episode': 2}, 'call-1')],
                              finish_reason='tool_call', model_name='mock')
 
 class Dispatcher:
@@ -42,19 +45,18 @@ class Dispatcher:
     def definitions(self):
         real_tools = [SimpleNamespace(name=spec.name, description=spec.description, parameters_json_schema=spec.schema)
                       for spec in TOOL_SPECS.values()]
-        return real_tools + [
-            SimpleNamespace(name='read', description='test read', parameters_json_schema={
-                'type': 'object', 'properties': {'episode': {'type': 'integer'}}, 'required': ['episode'], 'additionalProperties': False}),
-            SimpleNamespace(name='write', description='test write', parameters_json_schema={
-                'type': 'object', 'properties': {'private': {'type': 'number'}}, 'required': ['private'], 'additionalProperties': False}),
-        ]
+        return real_tools
     def validate(self, name, args):
-        assert (name, args) in [('read', {'episode': 2}), ('write', {'private': 0.0})]
-        return SimpleNamespace(writes=name == 'write')
+        assert name in ('dramaclaw_get_creation_progress', 'dramaclaw_generate_script') and args == {'episode': 2}
+        return SimpleNamespace(writes=name == 'dramaclaw_generate_script')
     async def dispatch(self, name, args):
         self.calls.append((name, args))
-        if name == 'write': assert type(args['private']) is float
-        if name == 'read': return {'ok': True, 'data': {'title': '第一集'}}
+        if name == 'dramaclaw_get_creation_progress':
+            return {'ok': True, 'data': {'version': 1, 'source': {'uploads': 1, 'imported': True},
+                'project': {'characters': 1, 'episodes': 1},
+                'episode': {'number': 2, 'exists': True, 'identity_planned': True, 'beats': 0,
+                    'all_beats_have_content': False, 'sketches_missing': 0, 'sketches_stale': 0,
+                    'identity_detected': 0, 'first_frames_present': 0}, 'active_steps': []}}
         self.write_attempted = True
         return {'ok': True, 'result': 'verified'}
 
@@ -98,7 +100,8 @@ async def main():
             dispatcher=dispatcher, stream=False).run('private prompt', scope='project', bind_strategy=bind_strategy,
                 history=[{'role': 'user', 'content': 'previous user message'}]), 10)
         assert len(bindings) == 1 and len(bindings[0]) == 64
-        assert result.write_attempted and model.calls == 2 and dispatcher.calls == [('read', {'episode': 2}), ('write', {'private': 0.0})]
+        assert result.write_attempted and model.calls == 2 and dispatcher.calls == [
+            ('dramaclaw_get_creation_progress', {'episode': 2}), ('dramaclaw_generate_script', {'episode': 2})]
         print('Python–Pi local WebSocket: verified read, continuation and one host-owned write')
     finally:
         if ELECTRON:
