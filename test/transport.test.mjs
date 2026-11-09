@@ -52,7 +52,7 @@ async function pair() {
 test("real local socket runs one verified write and sends no private data", { timeout: 10_000 }, async () => {
   const p = await pair();
   try {
-    p.send("turn.start", "attempt-1", "start-1", { tools: [tool] });
+    p.send("turn.start", "attempt-1", "start-1", { prompt: "当前创作目标", history: [], tools: [tool] });
     const accepted = await p.next();
     const model = await p.next();
     assert.equal(accepted.type, "turn.accept");
@@ -73,7 +73,7 @@ test("real local socket runs one verified write and sends no private data", { ti
 test("host abort terminates an in-flight attempt without retry", { timeout: 10_000 }, async () => {
   const p = await pair();
   try {
-    p.send("turn.start", "attempt-1", "start-1", { tools: [] });
+    p.send("turn.start", "attempt-1", "start-1", { prompt: "当前创作目标", history: [], tools: [] });
     assert.equal((await p.next()).type, "turn.accept");
     assert.equal((await p.next()).type, "model.call");
     p.send("turn.abort", "attempt-1", "abort-1");
@@ -85,7 +85,7 @@ test("invalid request association and out-of-order frames close the connection",
   for (const invalid of ["request", "sequence"]) {
     const p = await pair();
     try {
-      p.send("turn.start", "attempt-1", "start-1", { tools: [] });
+      p.send("turn.start", "attempt-1", "start-1", { prompt: "当前创作目标", history: [], tools: [] });
       await p.next();
       await p.next();
       const closed = once(p.peer, "close");
@@ -110,8 +110,8 @@ test("only the local orchestrator endpoint is accepted", { timeout: 10_000 }, as
 test("cancelling one concurrent turn tolerates its late reply and preserves another", { timeout: 10_000 }, async () => {
   const p = await pair();
   try {
-    p.send("turn.start", "a", "start-a", { tools: [tool] });
-    p.send("turn.start", "b", "start-b", { tools: [tool] });
+    p.send("turn.start", "a", "start-a", { prompt: "当前创作目标", history: [], tools: [tool] });
+    p.send("turn.start", "b", "start-b", { prompt: "当前创作目标", history: [], tools: [tool] });
     const initial = [await p.next(), await p.next(), await p.next(), await p.next()];
     const a = initial.find((item) => item.turn_id === "a" && item.type === "model.call");
     const b = initial.find((item) => item.turn_id === "b" && item.type === "model.call");
@@ -137,7 +137,7 @@ test("cancelling one concurrent turn tolerates its late reply and preserves anot
 test("tool reply after cancellation is ignored without closing the connection", { timeout: 10_000 }, async () => {
   const p = await pair();
   try {
-    p.send("turn.start", "a", "start", { tools: [tool] });
+    p.send("turn.start", "a", "start", { prompt: "当前创作目标", history: [], tools: [tool] });
     await p.next();
     const model = await p.next();
     p.send("model.result", "a", model.request_id,
@@ -151,10 +151,10 @@ test("tool reply after cancellation is ignored without closing the connection", 
   } finally { await p.close(); }
 });
 
-test("disconnect stops active attempts and reports a bounded reason", { timeout: 10_000 }, async () => {
+test("disconnect during an active attempt reports a bounded reason", { timeout: 10_000 }, async () => {
   const p = await pair();
   try {
-    p.send("turn.start", "a", "start", { tools: [] });
+    p.send("turn.start", "a", "start", { prompt: "当前创作目标", history: [], tools: [] });
     await p.next();
     assert.equal((await p.next()).type, "model.call");
     p.peer.terminate();
@@ -167,7 +167,7 @@ test("extra model result keys and replies to unknown turns fail closed", { timeo
   for (const mode of ["extra", "unknown"]) {
     const p = await pair();
     try {
-      p.send("turn.start", "a", "start", { tools: [] });
+      p.send("turn.start", "a", "start", { prompt: "当前创作目标", history: [], tools: [] });
       await p.next();
       const model = await p.next();
       const done = p.connection.closed;
@@ -181,13 +181,13 @@ test("extra model result keys and replies to unknown turns fail closed", { timeo
 test("retired attempts accept only replies to their cancelled requests", { timeout: 10_000 }, async () => {
   const p = await pair();
   try {
-    p.send("turn.start", "a", "start", { tools: [] });
+    p.send("turn.start", "a", "start", { prompt: "当前创作目标", history: [], tools: [] });
     await p.next();
     const model = await p.next();
     p.send("turn.abort", "a", "abort");
     assert.equal((await p.next()).type, "turn.end");
     p.send("model.error", "a", model.request_id);
-    p.send("turn.start", "b", "start-b", { tools: [] });
+    p.send("turn.start", "b", "start-b", { prompt: "当前创作目标", history: [], tools: [] });
     const accepted = await p.next();
     assert.equal(accepted.type, "turn.accept");
     assert.equal(accepted.turn_id, "b");
@@ -202,7 +202,7 @@ test("retired attempts accept only replies to their cancelled requests", { timeo
 test("a mismatched late reply is rejected", { timeout: 10_000 }, async () => {
   const p = await pair();
   try {
-    p.send("turn.start", "a", "start", { tools: [] });
+    p.send("turn.start", "a", "start", { prompt: "当前创作目标", history: [], tools: [] });
     await p.next();
     const model = await p.next();
     p.send("turn.abort", "a", "abort");
@@ -215,7 +215,7 @@ test("normal host close and oversized frame report distinct reasons", { timeout:
   for (const mode of ["normal", "oversized"]) {
     const p = await pair();
     try {
-      p.send("turn.start", "a", "start", { tools: [] });
+      p.send("turn.start", "a", "start", { prompt: "当前创作目标", history: [], tools: [] });
       await p.next();
       await p.next();
       if (mode === "normal") {
@@ -230,7 +230,7 @@ test("normal host close and oversized frame report distinct reasons", { timeout:
 test("cancelled model write proposal is ignored and cannot be repeated", { timeout: 10_000 }, async () => {
   const p = await pair();
   try {
-    p.send("turn.start", "a", "start", { tools: [tool] });
+    p.send("turn.start", "a", "start", { prompt: "当前创作目标", history: [], tools: [tool] });
     await p.next();
     const model = await p.next();
     p.send("turn.abort", "a", "abort");
@@ -246,7 +246,7 @@ test("cancelled model write proposal is ignored and cannot be repeated", { timeo
 test("late model results containing private content are rejected", { timeout: 10_000 }, async () => {
   const p = await pair();
   try {
-    p.send("turn.start", "a", "start", { tools: [] });
+    p.send("turn.start", "a", "start", { prompt: "当前创作目标", history: [], tools: [] });
     await p.next();
     const model = await p.next();
     p.send("turn.abort", "a", "abort");
@@ -264,5 +264,39 @@ test("explicit close reports closed and sends a normal close frame", { timeout: 
     assert.equal(await p.connection.closed, "closed");
     assert.equal(p.connection.connected, false);
     assert.equal((await peerClosed)[0], 1000);
+  } finally { await p.close(); }
+});
+
+
+test("invalid start closes the connection while another attempt is active", { timeout: 10000 }, async () => {
+  for (const payload of [
+    { tools: [] },
+    { prompt: "生成", history: [], tools: [], extra: true },
+    { prompt: "😀".repeat(24001), history: [], tools: [] },
+    { prompt: "", history: [], tools: [] },
+  ]) {
+    const p = await pair();
+    try {
+      p.send("turn.start", "active", "start-active", { prompt: "正在生成", history: [], tools: [] });
+      assert.equal((await p.next()).type, "turn.accept");
+      assert.equal((await p.next()).type, "model.call");
+      p.send("turn.start", "bad", "start-bad", payload);
+      assert.equal(await p.connection.closed, "protocol_error");
+      assert.equal(p.connection.connected, false);
+    } finally { await p.close(); }
+  }
+});
+
+test("local socket accepts CJK and emoji history", { timeout: 10000 }, async () => {
+  const p = await pair();
+  try {
+    p.send("turn.start", "a", "start", { prompt: "画第一集😀", history: [
+      { role: "user", content: "素材已导入😀" }, { role: "assistant", content: "可以生成草图" },
+    ], tools: [] });
+    assert.equal((await p.next()).type, "turn.accept");
+    const model = await p.next();
+    p.send("model.result", "a", model.request_id, { parts: [] });
+    assert.equal((await p.next()).type, "turn.end");
+    assert.equal(p.connection.connected, true);
   } finally { await p.close(); }
 });

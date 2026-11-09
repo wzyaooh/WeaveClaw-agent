@@ -2,6 +2,17 @@
 import { Agent } from "@earendil-works/pi-agent-core";
 import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
 
+const MAX_PROMPT_CHARS = 24_000;
+const MAX_HISTORY_MESSAGES = 40;
+const MAX_HISTORY_CHARS = 48_000;
+
+function codePointCountWithin(value, limit) {
+  if (value.length > limit * 2) return -1;
+  let count = 0;
+  for (const _character of value) if (++count > limit) return -1;
+  return count;
+}
+
 const MODEL = Object.freeze({ id: "host", name: "host", provider: "host", api: "host", baseUrl: "",
   input: ["text"], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
   contextWindow: 128000, maxTokens: 4096 });
@@ -29,7 +40,8 @@ export function contentFromHost(parts, allowed) {
 
 /**
  * `host.request` is a local transport abstraction; it does not grant model or
- * tool access. Python must verify complete model responses and authorize every
+ * tool access. The bounded prompt and text history are provided to Pi locally.
+ * Python must verify complete model responses and authorize every
  * proposed tool call. `tools` contains only host-supplied empty schemas. Model
  * requests use `{}`; tool requests carry only the ID, name and empty arguments.
  * Model `{parts}` contain only empty-argument tool calls with nonempty IDs and
@@ -38,10 +50,25 @@ export function contentFromHost(parts, allowed) {
  * own abort signal, which is detached once the request settles.
  */
 export function createTurn(input) {
-  if (!input || typeof input !== "object" || Object.keys(input).sort().join(",") !== "host,tools") {
+  if (!input || typeof input !== "object" || Object.keys(input).sort().join(",") !== "history,host,prompt,tools") {
     throw new TypeError("invalid_turn_start");
   }
-  const { tools, host } = input;
+  const { tools, host, prompt, history } = input;
+  if (typeof prompt !== "string" || !prompt || codePointCountWithin(prompt, MAX_PROMPT_CHARS) < 0 ||
+      !Array.isArray(history) || history.length > MAX_HISTORY_MESSAGES) {
+    throw new TypeError("invalid_turn_context");
+  }
+  let remaining = MAX_HISTORY_CHARS;
+  for (const item of history) {
+    if (!item || typeof item !== "object" || Array.isArray(item) ||
+        Object.keys(item).sort().join(",") !== "content,role" ||
+        !["user", "assistant"].includes(item.role) || typeof item.content !== "string" || !item.content) {
+      throw new TypeError("invalid_turn_context");
+    }
+    const count = codePointCountWithin(item.content, remaining);
+    if (count < 0) throw new TypeError("invalid_turn_context");
+    remaining -= count;
+  }
   if (!Array.isArray(tools) || typeof host?.request !== "function") {
     throw new TypeError("invalid_turn_start");
   }
@@ -121,7 +148,11 @@ export function createTurn(input) {
     });
     return stream;
   };
-  const agent = new Agent({ initialState: { model: MODEL, systemPrompt: "Follow the host's creative workflow.", tools: mappedTools },
+  const priorMessages = history.map((item) => item.role === "user"
+    ? { role: "user", content: [{ type: "text", text: item.content }], timestamp: Date.now() }
+    : assistant([{ type: "text", text: item.content }], "stop"));
+  const agent = new Agent({ initialState: { model: MODEL, systemPrompt: "Follow the host's creative workflow.",
+    messages: priorMessages, tools: mappedTools },
     streamFn, toolExecution: "sequential", finishTurn: async (_turn, signal) => {
       if (!finished && deliveredCalls !== expectedCalls) {
         finished = true;
@@ -134,7 +165,7 @@ export function createTurn(input) {
     async run() {
       if (used) throw new Error("turn_already_used");
       used = true;
-      await agent.prompt("Continue the host-controlled creative turn.");
+      await agent.prompt(prompt);
       return { aborted: failure === "aborted", error: failure };
     },
   };
