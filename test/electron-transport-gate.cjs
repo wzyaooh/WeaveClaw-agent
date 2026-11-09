@@ -19,7 +19,7 @@ app.whenReady().then(async () => {
     const send = (type, requestId, payload) => peer.send(JSON.stringify({ version: 2, type,
       sequence: ++sequence, turn_id: "attempt-1", request_id: requestId, payload }));
     const tool = { name: "write", description: "模拟写入", parameters: { type: "object", properties: {}, additionalProperties: false } };
-    send("turn.start", "start-1", { prompt: "当前创作目标", history: [], tools: [tool] });
+    send("turn.start", "start-1", { prompt: "当前创作目标", history: [], scope: "project", tools: [tool] });
     peer.on("message", (raw) => {
       const frame = JSON.parse(raw.toString());
       if (frame.type === "model.call") {

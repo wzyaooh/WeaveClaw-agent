@@ -26,6 +26,9 @@ class Model:
     def __init__(self): self.calls = 0
     async def request(self, messages, settings, parameters):
         self.calls += 1
+        assert 'Work toward one episode in order' in messages[0].parts[0].content
+        assert 'host controls identity' in messages[0].parts[0].content
+        assert messages[1].parts[0].content == 'previous user message'
         if self.calls == 1:
             return ModelResponse(parts=[TextPart('先读取素材'), ToolCallPart('read', {'episode': 2}, 'read-1')],
                                  finish_reason='tool_call', model_name='mock')
@@ -88,8 +91,13 @@ async def main():
                 if not line:
                     raise RuntimeError('test process failed to start')
         dispatcher, model = Dispatcher(), Model()
+        bindings = []
+        async def bind_strategy(digest):
+            bindings.append(digest)
         result = await asyncio.wait_for(OrchestratorRuntime(link=app.state.orchestrator_link, model=model,
-                                                           dispatcher=dispatcher, stream=False).run('private prompt'), 10)
+            dispatcher=dispatcher, stream=False).run('private prompt', scope='project', bind_strategy=bind_strategy,
+                history=[{'role': 'user', 'content': 'previous user message'}]), 10)
+        assert len(bindings) == 1 and len(bindings[0]) == 64
         assert result.write_attempted and model.calls == 2 and dispatcher.calls == [('read', {'episode': 2}), ('write', {'private': 0.0})]
         print('Python–Pi local WebSocket: verified read, continuation and one host-owned write')
     finally:

@@ -4,6 +4,8 @@ import { compile } from "@earendil-works/pi-schema";
 import { formats } from "@earendil-works/pi-schema/formats";
 import { isDeepStrictEqual } from "node:util";
 import { createAssistantMessageEventStream, validateToolArguments } from "@earendil-works/pi-ai";
+import { createProjection } from "./context.mjs";
+import { selectStrategy } from "./strategy.mjs";
 
 const MAX_PROMPT_CHARS = 24_000;
 const MAX_HISTORY_MESSAGES = 40;
@@ -95,14 +97,14 @@ export function validToolResult(value) {
  * proposed tool call. The host supplies schemas, complete validated model text
  * and tool proposals, and bounded business results over the authenticated local
  * link. Python remains authoritative for execution, access and receipts.
- * `model.call` requests are empty; `tool.call` includes the Pi-validated args.
+ * `model.call` contains only references; `tool.call` includes Pi-validated args.
  * Each pending request receives its own abort signal, detached on settlement.
  */
 export function createTurn(input) {
-  if (!input || typeof input !== "object" || Object.keys(input).sort().join(",") !== "history,host,prompt,tools") {
+  if (!input || typeof input !== "object" || Object.keys(input).sort().join(",") !== "history,host,prompt,scope,tools") {
     throw new TypeError("invalid_turn_start");
   }
-  const { tools, host, prompt, history } = input;
+  const { tools, host, prompt, history, scope } = input;
   if (typeof prompt !== "string" || !prompt || codePointCountWithin(prompt, MAX_PROMPT_CHARS) < 0 ||
       !Array.isArray(history) || history.length > MAX_HISTORY_MESSAGES) {
     throw new TypeError("invalid_turn_context");
@@ -118,7 +120,7 @@ export function createTurn(input) {
     if (count < 0) throw new TypeError("invalid_turn_context");
     remaining -= count;
   }
-  if (!Array.isArray(tools) || typeof host?.request !== "function") {
+  if (!Array.isArray(tools) || typeof host?.request !== "function" || !["home", "project"].includes(scope)) {
     throw new TypeError("invalid_turn_start");
   }
   let finished = false;
@@ -129,6 +131,11 @@ export function createTurn(input) {
   const names = new Set();
   const validators = new Map();
   let originals = new Map();
+  const strategy = selectStrategy(tools);
+  const priorMessages = history.map((item) => item.role === "user"
+    ? { role: "user", content: [{ type: "text", text: item.content }], timestamp: Date.now() }
+    : assistant([{ type: "text", text: item.content }], "stop"));
+  const projection = createProjection(priorMessages, prompt);
   const request = async (kind, payload, signal) => {
     const controller = new AbortController();
     const abort = () => controller.abort();
@@ -164,6 +171,7 @@ export function createTurn(input) {
           deliveredCalls += 1;
           const value = await request("tool.call", { tool_call_id: id, name: tool.name, arguments: original.arguments }, signal);
           if (!validToolResult(value)) throw new Error("invalid_tool_result");
+          projection.recordToolResult(id, tool.name, value);
           if (value.final) {
             finished = true;
             agent.abort();
@@ -178,7 +186,7 @@ export function createTurn(input) {
       },
     };
   });
-  const streamFn = (_model, _context, options) => {
+  const streamFn = (_model, context, options) => {
     const stream = createAssistantMessageEventStream();
     const signal = options.signal;
     const partial = assistant([], "stop");
@@ -186,7 +194,7 @@ export function createTurn(input) {
     Promise.resolve().then(async () => {
       try {
         if (signal?.aborted) throw new Error("aborted");
-        const result = await request("model.call", {}, signal);
+        const result = await request("model.call", { context: projection.project(context.messages) }, signal);
         if (signal?.aborted) throw new Error("aborted");
         const content = contentFromHost(result?.parts, names);
         // Reject invalid, duplicated or SDK-coerced calls before the first tool.
@@ -204,6 +212,7 @@ export function createTurn(input) {
         expectedCalls = content.filter((part) => part.type === "toolCall").length;
         deliveredCalls = 0;
         const message = assistant(content, content.some((part) => part.type === "toolCall") ? "toolUse" : "stop");
+        projection.recordResponse(message);
         stream.push({ type: "done", reason: message.stopReason, message });
       } catch (error) {
         failure = signal?.aborted ? "aborted" : "host_model_failed";
@@ -213,9 +222,6 @@ export function createTurn(input) {
     });
     return stream;
   };
-  const priorMessages = history.map((item) => item.role === "user"
-    ? { role: "user", content: [{ type: "text", text: item.content }], timestamp: Date.now() }
-    : assistant([{ type: "text", text: item.content }], "stop"));
   const agent = new Agent({ initialState: { model: MODEL, systemPrompt: "Follow the host's creative workflow.",
     messages: priorMessages, tools: mappedTools },
     streamFn, toolExecution: "sequential", finishTurn: async (_turn, signal) => {
@@ -226,6 +232,7 @@ export function createTurn(input) {
       return finished ? { action: "end" } : undefined;
     } });
   return {
+    strategy,
     abort: () => agent.abort(),
     async run() {
       if (used) throw new Error("turn_already_used");

@@ -23,10 +23,10 @@ const result = (final = false) => ({ kind: "tool.call", value: { final, ok: true
 
 test("Pi asks the host for model and tool work and stops after a write", async () => {
   const host = mockHost([model(call("write_project")), result(true)]);
-  const turn = createTurn({ prompt: "当前创作目标", history: [], tools: [write], host });
+  const turn = createTurn({ scope: "project", prompt: "当前创作目标", history: [], tools: [write], host });
   assert.deepEqual(await turn.run(), { aborted: false, error: undefined });
   assert.deepEqual(host.requests, [
-    { kind: "model.call", payload: {} },
+    { kind: "model.call", payload: { context: [{ ref: "prompt" }] } },
     { kind: "tool.call", payload: { tool_call_id: "tool-1", name: "write_project", arguments: {} } },
   ]);
   await assert.rejects(turn.run(), /turn_already_used/);
@@ -34,15 +34,35 @@ test("Pi asks the host for model and tool work and stops after a write", async (
 
 test("Pi returns a read result to the host before the next model call", async () => {
   const host = mockHost([model(call()), result(), model()]);
-  const output = await createTurn({ prompt: "当前创作目标", history: [], tools: [tool], host }).run();
+  const output = await createTurn({ scope: "project", prompt: "当前创作目标", history: [], tools: [tool], host }).run();
   assert.equal(output.error, undefined);
   assert.deepEqual(host.requests.map((item) => item.kind), ["model.call", "tool.call", "model.call"]);
+  assert.deepEqual(host.requests[2].payload, { context: [{ ref: "prompt" }, { ref: "response", index: 1 },
+    { ref: "tool", response: 1, id: "tool-1" }] });
+});
+
+test("Pi keeps repeated tool IDs distinct across response rounds", async () => {
+  const host = mockHost([model(call()), result(), model(call()), result(), model()]);
+  const output = await createTurn({ scope: "project", prompt: "目标", history: [], tools: [tool], host }).run();
+  assert.equal(output.error, undefined);
+  assert.deepEqual(host.requests[4].payload, { context: [{ ref: "prompt" },
+    { ref: "response", index: 1 }, { ref: "tool", response: 1, id: "tool-1" },
+    { ref: "response", index: 2 }, { ref: "tool", response: 2, id: "tool-1" }] });
+});
+
+test("Pi projects every acknowledged tool in a complete batch", async () => {
+  const second = { ...call(), id: "tool-2" };
+  const host = mockHost([model(call(), second), result(), result(), model()]);
+  const output = await createTurn({ scope: "project", prompt: "目标", history: [], tools: [tool], host }).run();
+  assert.equal(output.error, undefined);
+  assert.deepEqual(host.requests[3].payload, { context: [{ ref: "prompt" }, { ref: "response", index: 1 },
+    { ref: "tool", response: 1, id: "tool-1" }, { ref: "tool", response: 1, id: "tool-2" }] });
 });
 
 test("a failed model or tool request stops without another host call", async () => {
   for (const replies of [[new Error("lost")], [model(call()), new Error("lost")]]) {
     const host = mockHost(replies);
-    const output = await createTurn({ prompt: "当前创作目标", history: [], tools: [tool], host }).run();
+    const output = await createTurn({ scope: "project", prompt: "当前创作目标", history: [], tools: [tool], host }).run();
     assert.match(output.error, /^host_(model|tool)_failed$/);
     assert.ok(host.requests.length <= 2);
   }
@@ -57,7 +77,7 @@ test("an abort during the model request does not execute a tool", async () => {
     started();
     return new Promise((_resolve, reject) => signal.addEventListener("abort", () => reject(new Error("aborted")), { once: true }));
   } };
-  const turn = createTurn({ prompt: "当前创作目标", history: [], tools: [tool], host });
+  const turn = createTurn({ scope: "project", prompt: "当前创作目标", history: [], tools: [tool], host });
   const running = turn.run();
   await entered;
   turn.abort();
@@ -68,7 +88,7 @@ test("an abort during the model request does not execute a tool", async () => {
 
 test("a final write prevents later calls in the same batch", async () => {
   const host = mockHost([model(call("write_project"), { ...call("read_project"), id: "tool-2" }), result(true)]);
-  const output = await createTurn({ prompt: "当前创作目标", history: [], tools: [write, tool], host }).run();
+  const output = await createTurn({ scope: "project", prompt: "当前创作目标", history: [], tools: [write, tool], host }).run();
   assert.equal(output.error, undefined);
   assert.deepEqual(host.requests.map((item) => item.kind), ["model.call", "tool.call"]);
 });
@@ -76,7 +96,7 @@ test("a final write prevents later calls in the same batch", async () => {
 test("schema-invalid arguments or an unknown tool fail before any tool request", async () => {
   for (const part of [{ ...call("write_project"), arguments: { episode: "3" } }, call("unknown")]) {
     const host = mockHost([model(part)]);
-    const output = await createTurn({ prompt: "当前创作目标", history: [], tools: [write], host }).run();
+    const output = await createTurn({ scope: "project", prompt: "当前创作目标", history: [], tools: [write], host }).run();
     assert.equal(output.error, "host_model_failed");
     assert.deepEqual(host.requests.map((item) => item.kind), ["model.call"]);
   }
@@ -86,7 +106,7 @@ test("invalid tool results never cause another model request", async () => {
   const invalid = [{ final: true, ok: true }, { final: true }, { final: "true", ok: true }, null, []];
   for (const value of invalid) {
     const host = mockHost([model(call("write_project")), { kind: "tool.call", value }]);
-    const output = await createTurn({ prompt: "当前创作目标", history: [], tools: [write], host }).run();
+    const output = await createTurn({ scope: "project", prompt: "当前创作目标", history: [], tools: [write], host }).run();
     assert.equal(output.error, "host_tool_failed");
     assert.deepEqual(host.requests.map((item) => item.kind), ["model.call", "tool.call"]);
     assert.deepEqual(host.requests[1].payload.arguments, {});
@@ -102,7 +122,7 @@ test("failed read can proceed, final failure stops, and settled requests are not
     if (kind === "model.call") return { parts: [call(callNumber === 1 ? "read_project" : "write_project")] };
     return { ok: false, final: callNumber === 4, result: { ok: false } };
   } };
-  const output = await createTurn({ prompt: "当前创作目标", history: [], tools: [tool, write], host }).run();
+  const output = await createTurn({ scope: "project", prompt: "当前创作目标", history: [], tools: [tool, write], host }).run();
   assert.equal(output.error, undefined);
   assert.equal(output.aborted, false);
   assert.equal(callNumber, 4);
@@ -111,9 +131,9 @@ test("failed read can proceed, final failure stops, and settled requests are not
 
 test("turn definition rejects old shapes and invalid tool schemas", () => {
   const host = mockHost([]);
-  assert.throws(() => createTurn({ tools: [tool], host }), /invalid_turn_start/);
-  assert.throws(() => createTurn({ prompt: "private", tools: [tool], host }), /invalid_turn_start/);
-  assert.throws(() => createTurn({ prompt: "当前创作目标", history: [], tools: [{ ...tool, parameters: { type: "object", required: ["x"], properties: null } }], host }), /invalid_tool_definition/);
+  assert.throws(() => createTurn({ scope: "project", tools: [tool], host }), /invalid_turn_start/);
+  assert.throws(() => createTurn({ scope: "project", prompt: "private", tools: [tool], host }), /invalid_turn_start/);
+  assert.throws(() => createTurn({ scope: "project", prompt: "当前创作目标", history: [], tools: [{ ...tool, parameters: { type: "object", required: ["x"], properties: null } }], host }), /invalid_tool_definition/);
 });
 
 test("batch cancellation remains aborted when the host still answers", async () => {
@@ -125,7 +145,7 @@ test("batch cancellation remains aborted when the host still answers", async () 
     turn.abort();
     return { final: false, ok: true, result: { ok: true } };
   } };
-  turn = createTurn({ prompt: "当前创作目标", history: [], tools: [tool], host });
+  turn = createTurn({ scope: "project", prompt: "当前创作目标", history: [], tools: [tool], host });
   assert.deepEqual(await turn.run(), { aborted: true, error: "aborted" });
   assert.deepEqual(requests, ["model.call", "tool.call"]);
 });
@@ -141,7 +161,7 @@ test("cancelling an in-flight tool forwards abort without another request", asyn
     started();
     return new Promise((_resolve, reject) => signal.addEventListener("abort", () => reject(new Error("aborted")), { once: true }));
   } };
-  const turn = createTurn({ prompt: "当前创作目标", history: [], tools: [tool], host });
+  const turn = createTurn({ scope: "project", prompt: "当前创作目标", history: [], tools: [tool], host });
   const running = turn.run();
   await entered;
   turn.abort();
@@ -153,7 +173,7 @@ test("cancelling an in-flight tool forwards abort without another request", asyn
 test("a mixed valid and invalid batch never executes the valid call", async () => {
   for (const bad of [call("unknown"), { ...call("write_project"), id: "tool-2", arguments: { secret: "value" } }, { type: "text", text: "private", extra: true }]) {
     const host = mockHost([model(call("write_project"), bad)]);
-    assert.equal((await createTurn({ prompt: "当前创作目标", history: [], tools: [write], host }).run()).error, "host_model_failed");
+    assert.equal((await createTurn({ scope: "project", prompt: "当前创作目标", history: [], tools: [write], host }).run()).error, "host_model_failed");
     assert.deepEqual(host.requests.map((item) => item.kind), ["model.call"]);
   }
 });
@@ -168,13 +188,15 @@ test("Pi receives the bounded host conversation and current creative goal", asyn
   };
   try {
     const host = mockHost([model()]);
-    const output = await createTurn({ prompt: "为第一集生成草图", history: [
+    const output = await createTurn({ scope: "project", prompt: "为第一集生成草图", history: [
       { role: "user", content: "先检查素材" }, { role: "assistant", content: "已检查" },
     ], tools: [], host }).run();
     assert.equal(output.error, undefined);
     assert.deepEqual(observed, { prompt: "为第一集生成草图", history: [
       { role: "user", text: "先检查素材" }, { role: "assistant", text: "已检查" },
     ] });
+    assert.deepEqual(host.requests[0].payload, { context: [{ ref: "history", index: 0 },
+      { ref: "history", index: 1 }, { ref: "prompt" }] });
   } finally { Agent.prototype.prompt = originalPrompt; }
 });
 
@@ -193,14 +215,14 @@ test("turn context rejects extra fields and oversized conversation", () => {
     { prompt: "x", history: [{ role: "user", content: "x", secret: "x" }] },
     { prompt: "x", history: Array.from({ length: 41 }, () => ({ role: "user", content: "x" })) },
     { prompt: "x", history: [{ role: "user", content: "x".repeat(48001) }] },
-  ]) assert.throws(() => createTurn({ ...context, tools: [], host }), /invalid_turn_context/);
+  ]) assert.throws(() => createTurn({ scope: "project", ...context, tools: [], host }), /invalid_turn_context/);
 });
 
 
 test("context accepts exact Unicode and history limits", async () => {
   const host = mockHost([model()]);
   const history = Array.from({ length: 40 }, (_, index) => ({ role: index % 2 ? "assistant" : "user", content: "😀".repeat(1200) }));
-  assert.equal((await createTurn({ prompt: "😀".repeat(24000), history, tools: [], host }).run()).error, undefined);
+  assert.equal((await createTurn({ scope: "project", prompt: "😀".repeat(24000), history, tools: [], host }).run()).error, undefined);
 });
 
 
@@ -222,8 +244,11 @@ test("Pi uses host model text, validated tool arguments and read results in its 
         { type: "tool_call", id: "read-1", name: "read_project", arguments: { episode: 2 } }] }
         : { parts: [{ type: "text", text: "已检查" }] };
     } };
-    const output = await createTurn({ prompt: "检查第一集", history: [], tools: [{ ...tool, parameters: schema }], host }).run();
+    const output = await createTurn({ scope: "project", prompt: "检查第一集", history: [], tools: [{ ...tool, parameters: schema }], host }).run();
     assert.equal(output.error, undefined);
+    assert.deepEqual(calls[2].payload, { context: [{ ref: "prompt" }, { ref: "response", index: 1 },
+      { ref: "tool", response: 1, id: "read-1" }] });
+    assert.ok(!JSON.stringify(calls[2].payload).includes("第一集"));
     assert.deepEqual(calls[1], { kind: "tool.call", payload: { tool_call_id: "read-1", name: "read_project", arguments: { episode: 2 } } });
     assert.ok(JSON.stringify(seenContext).includes("第一集"));
     assert.ok(messages.some((message) => message.role === "assistant" && message.content.some((part) => part.type === "text" && part.text === "先读取当前进度")));
@@ -240,11 +265,11 @@ test("strict whole-batch validation rejects coerced values and duplicate IDs bef
   const target = { ...write, parameters: schema };
   for (const args of [{ flag: 1 }, { number: true }, { count: 2.9 }, { count: "3" }, { count: 9007199254740992 }, { optional: null }, { list: 1 }]) {
     const host = mockHost([model(call(), { ...call("write_project"), id: "tool-2", arguments: args })]);
-    assert.equal((await createTurn({ prompt: "生成", history: [], tools: [tool, target], host }).run()).error, "host_model_failed");
+    assert.equal((await createTurn({ scope: "project", prompt: "生成", history: [], tools: [tool, target], host }).run()).error, "host_model_failed");
     assert.deepEqual(host.requests.map((item) => item.kind), ["model.call"]);
   }
   const duplicate = mockHost([model(call(), { ...call("write_project"), arguments: { flag: true } })]);
-  assert.equal((await createTurn({ prompt: "生成", history: [], tools: [tool, target], host: duplicate }).run()).error, "host_model_failed");
+  assert.equal((await createTurn({ scope: "project", prompt: "生成", history: [], tools: [tool, target], host: duplicate }).run()).error, "host_model_failed");
   assert.deepEqual(duplicate.requests.map((item) => item.kind), ["model.call"]);
 });
 
@@ -256,7 +281,7 @@ test("invalid schemas fail before requesting the host model", () => {
     { item: { prefixItems: [{ type: "strnig" }] } }, { item: { $defs: { bad: { type: "strnig" } } } },
     { item: { dependencies: { a: { type: "strnig" } } } }, { item: { unevaluatedItems: { type: "strnig" } } },
     { item: { $ref: "#/x-shared" } }]) {
-    assert.throws(() => createTurn({ prompt: "生成", history: [], tools: [{ ...tool, parameters: {
+    assert.throws(() => createTurn({ scope: "project", prompt: "生成", history: [], tools: [{ ...tool, parameters: {
       type: "object", properties, additionalProperties: false,
     } }], host }), /invalid_tool_definition/);
   }
@@ -279,7 +304,7 @@ test("nested valid definitions and nullable schema run without changing values",
     $defs: { Choice: { anyOf: [{ type: "string" }, { type: "null" }] } },
     properties: { item: { $ref: "#/$defs/Choice" } }, required: ["item"] };
   const host = mockHost([model({ ...call("write_project"), arguments: { item: null } }), result(true)]);
-  assert.equal((await createTurn({ prompt: "生成", history: [], tools: [{ ...write, parameters }], host }).run()).error, undefined);
+  assert.equal((await createTurn({ scope: "project", prompt: "生成", history: [], tools: [{ ...write, parameters }], host }).run()).error, undefined);
   assert.deepEqual(host.requests[1].payload.arguments, { item: null });
 });
 
@@ -289,11 +314,11 @@ test("safe numeric boundaries and nested unsafe numbers are checked", async () =
     properties: { list: { type: "array", items: { type: "number" } } }, required: ["list"] };
   for (const value of [9007199254740991, -9007199254740991]) {
     const host = mockHost([model({ ...call("write_project"), arguments: { list: [value] } }), result(true)]);
-    assert.equal((await createTurn({ prompt: "生成", history: [], tools: [{ ...write, parameters }], host }).run()).error, undefined);
+    assert.equal((await createTurn({ scope: "project", prompt: "生成", history: [], tools: [{ ...write, parameters }], host }).run()).error, undefined);
   }
   for (const value of [9007199254740992, -9007199254740992, 1e16]) {
     const host = mockHost([model({ ...call("write_project"), arguments: { list: [value] } })]);
-    assert.equal((await createTurn({ prompt: "生成", history: [], tools: [{ ...write, parameters }], host }).run()).error, "host_model_failed");
+    assert.equal((await createTurn({ scope: "project", prompt: "生成", history: [], tools: [{ ...write, parameters }], host }).run()).error, "host_model_failed");
     assert.deepEqual(host.requests.map((item) => item.kind), ["model.call"]);
   }
 });

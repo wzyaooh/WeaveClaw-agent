@@ -83,7 +83,7 @@ export async function connectHost({ url, token }) {
   };
   const start = (frame) => {
     if (turns.size >= 32 || turns.has(frame.turn_id) || retired.has(frame.turn_id) ||
-        Object.keys(frame.payload).sort().join(",") !== "history,prompt,tools" || !Array.isArray(frame.payload.tools)) {
+        Object.keys(frame.payload).sort().join(",") !== "history,prompt,scope,tools" || !Array.isArray(frame.payload.tools)) {
       throw new Error("invalid_turn_start");
     }
     const attempt = { pending: new Map(), cancelled: new Map(), turn: undefined };
@@ -107,9 +107,9 @@ export async function connectHost({ url, token }) {
         }
       });
     } };
-    attempt.turn = createTurn({ tools: frame.payload.tools, prompt: frame.payload.prompt, history: frame.payload.history, host });
+    attempt.turn = createTurn({ tools: frame.payload.tools, prompt: frame.payload.prompt, history: frame.payload.history, scope: frame.payload.scope, host });
     turns.set(frame.turn_id, attempt);
-    send("turn.accept", frame.turn_id, frame.request_id, {});
+    send("turn.accept", frame.turn_id, frame.request_id, { strategy: attempt.turn.strategy });
     void attempt.turn.run().then((result) => finish(frame.turn_id, result.error && !result.aborted ? "turn.error" : "turn.end"),
       () => finish(frame.turn_id, "turn.error"));
   };
