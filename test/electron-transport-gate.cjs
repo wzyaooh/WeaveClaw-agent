@@ -16,7 +16,7 @@ app.whenReady().then(async () => {
   server.on("connection", (peer, request) => {
     if (request.headers["x-weaveclaw-orchestrator-token"] !== token) { peer.terminate(); return; }
     let sequence = 0;
-    const send = (type, requestId, payload) => peer.send(JSON.stringify({ version: 1, type,
+    const send = (type, requestId, payload) => peer.send(JSON.stringify({ version: 2, type,
       sequence: ++sequence, turn_id: "attempt-1", request_id: requestId, payload }));
     const tool = { name: "write", description: "模拟写入", parameters: { type: "object", properties: {}, additionalProperties: false } };
     send("turn.start", "start-1", { prompt: "当前创作目标", history: [], tools: [tool] });
@@ -28,7 +28,7 @@ app.whenReady().then(async () => {
         if (JSON.stringify(frame.payload) !== JSON.stringify({ tool_call_id: "call-1", name: "write", arguments: {} })) {
           child.kill(); app.exit(1); return;
         }
-        send("tool.result", frame.request_id, { ok: true, final: true });
+        send("tool.result", frame.request_id, { ok: true, final: true, result: { ok: true } });
       } else if (frame.type === "turn.end") {
         verified = true;
         child.postMessage({ type: "stop" });

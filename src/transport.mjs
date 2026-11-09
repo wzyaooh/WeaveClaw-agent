@@ -1,7 +1,7 @@
 /** Local-only host transport. This module never invokes a model or business API. */
 import { randomUUID } from "node:crypto";
 import WebSocket from "ws";
-import { contentFromHost, createTurn } from "./turn.mjs";
+import { contentFromHost, createTurn, validToolResult } from "./turn.mjs";
 
 const MAX_BYTES = 2 * 1024 * 1024;
 const HOST_TYPES = new Set(["turn.start", "turn.abort", "model.result", "model.error", "tool.result"]);
@@ -13,7 +13,7 @@ function parseFrame(data, binary, expected) {
   const frame = JSON.parse(data.toString("utf8"));
   if (!frame || typeof frame !== "object" || Array.isArray(frame) ||
       Object.keys(frame).sort().join(",") !== "payload,request_id,sequence,turn_id,type,version" ||
-      frame.version !== 1 || !HOST_TYPES.has(frame.type) || !Number.isSafeInteger(frame.sequence) ||
+      frame.version !== 2 || !HOST_TYPES.has(frame.type) || !Number.isSafeInteger(frame.sequence) ||
       frame.sequence !== expected || !validId(frame.turn_id) || !validId(frame.request_id) ||
       !frame.payload || typeof frame.payload !== "object" || Array.isArray(frame.payload)) throw new Error("invalid_frame");
   return frame;
@@ -59,7 +59,7 @@ export async function connectHost({ url, token }) {
   };
   const send = (type, turnId, requestId, payload) => {
     if (closed || socket.readyState !== WebSocket.OPEN) throw new Error("host_disconnected");
-    const frame = JSON.stringify({ version: 1, type, sequence: outgoing + 1,
+    const frame = JSON.stringify({ version: 2, type, sequence: outgoing + 1,
       turn_id: turnId, request_id: requestId, payload });
     if (Buffer.byteLength(frame, "utf8") > MAX_BYTES) throw new Error("invalid_frame");
     outgoing += 1;
@@ -133,8 +133,7 @@ export async function connectHost({ url, token }) {
         contentFromHost(frame.payload.parts, null);
       }
       if (frame.type === "model.error" && Object.keys(frame.payload).length) throw new Error("invalid_result");
-      if (frame.type === "tool.result" && (Object.keys(frame.payload).sort().join(",") !== "final,ok" ||
-          typeof frame.payload.ok !== "boolean" || typeof frame.payload.final !== "boolean")) throw new Error("invalid_result");
+      if (frame.type === "tool.result" && !validToolResult(frame.payload)) throw new Error("invalid_result");
       const pending = attempt?.pending.get(frame.request_id);
       const cancelled = attempt?.cancelled ?? old.cancelled;
       const kind = pending?.kind ?? cancelled.get(frame.request_id);

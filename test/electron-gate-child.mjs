@@ -9,7 +9,7 @@ try {
   const host = { async request(kind) {
     requests.push(kind);
     return kind === "model.call" ? { parts: [{ type: "tool_call", id: "one", name: "write", arguments: {} }] }
-      : { final: true, ok: true };
+      : { final: true, ok: true, result: { ok: true } };
   } };
   const turn = await createTurn({ prompt: "当前创作目标", history: [], tools: [tool], host }).run();
   if (turn.error || requests.join(",") !== "model.call,tool.call") throw new Error("Pi 轮次适配验证失败");

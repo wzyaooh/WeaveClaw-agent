@@ -8,11 +8,12 @@ from types import SimpleNamespace
 
 import uvicorn
 from fastapi import FastAPI
-from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart
+from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart, ToolReturnPart
 
 from novelvideo.api.routes.desktop_orchestrator import router
 from novelvideo.chat.orchestrator_link import OrchestratorLink
 from novelvideo.chat.orchestrator_runtime import OrchestratorRuntime
+from novelvideo.chat.business_tools import TOOL_SPECS
 
 ELECTRON = os.environ.get('WEAVECLAW_TEST_ELECTRON')
 NODE = ELECTRON or os.environ.get('WEAVECLAW_TEST_NODE') or shutil.which('node')
@@ -25,19 +26,34 @@ class Model:
     def __init__(self): self.calls = 0
     async def request(self, messages, settings, parameters):
         self.calls += 1
+        if self.calls == 1:
+            return ModelResponse(parts=[TextPart('先读取素材'), ToolCallPart('read', {'episode': 2}, 'read-1')],
+                                 finish_reason='tool_call', model_name='mock')
+        assert any(isinstance(part, ToolReturnPart) and part.content['data']['title'] == '第一集'
+                   for message in messages for part in message.parts)
         return ModelResponse(parts=[ToolCallPart('write', {'private': 0.0}, 'call-1')],
                              finish_reason='tool_call', model_name='mock')
 
 class Dispatcher:
     def __init__(self): self.write_attempted = False; self.calls = []
     def definitions(self):
-        return [SimpleNamespace(name='write', description='test', parameters_json_schema={'type': 'object'})]
+        real_tools = [SimpleNamespace(name=spec.name, description=spec.description, parameters_json_schema=spec.schema)
+                      for spec in TOOL_SPECS.values()]
+        return real_tools + [
+            SimpleNamespace(name='read', description='test read', parameters_json_schema={
+                'type': 'object', 'properties': {'episode': {'type': 'integer'}}, 'required': ['episode'], 'additionalProperties': False}),
+            SimpleNamespace(name='write', description='test write', parameters_json_schema={
+                'type': 'object', 'properties': {'private': {'type': 'number'}}, 'required': ['private'], 'additionalProperties': False}),
+        ]
     def validate(self, name, args):
-        assert name == 'write' and args == {'private': 0.0}
-        return SimpleNamespace(writes=True)
+        assert (name, args) in [('read', {'episode': 2}), ('write', {'private': 0.0})]
+        return SimpleNamespace(writes=name == 'write')
     async def dispatch(self, name, args):
-        self.calls.append((name, args)); self.write_attempted = True
-        return {'ok': True, 'private_result': 'not for the agent'}
+        self.calls.append((name, args))
+        if name == 'write': assert type(args['private']) is float
+        if name == 'read': return {'ok': True, 'data': {'title': '第一集'}}
+        self.write_attempted = True
+        return {'ok': True, 'result': 'verified'}
 
 async def main():
     sock = socket.socket(); sock.bind(('127.0.0.1', 0)); sock.listen(100); sock.setblocking(False)
@@ -74,8 +90,8 @@ async def main():
         dispatcher, model = Dispatcher(), Model()
         result = await asyncio.wait_for(OrchestratorRuntime(link=app.state.orchestrator_link, model=model,
                                                            dispatcher=dispatcher, stream=False).run('private prompt'), 10)
-        assert result.write_attempted and model.calls == 1 and dispatcher.calls == [('write', {'private': 0.0})]
-        print('Python–Pi local WebSocket: verified one host-owned write')
+        assert result.write_attempted and model.calls == 2 and dispatcher.calls == [('read', {'episode': 2}), ('write', {'private': 0.0})]
+        print('Python–Pi local WebSocket: verified read, continuation and one host-owned write')
     finally:
         if ELECTRON:
             server.should_exit = True

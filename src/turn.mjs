@@ -1,6 +1,9 @@
 /** A single ephemeral Pi turn; model and business operations remain host-owned. */
 import { Agent } from "@earendil-works/pi-agent-core";
-import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
+import { compile } from "@earendil-works/pi-schema";
+import { formats } from "@earendil-works/pi-schema/formats";
+import { isDeepStrictEqual } from "node:util";
+import { createAssistantMessageEventStream, validateToolArguments } from "@earendil-works/pi-ai";
 
 const MAX_PROMPT_CHARS = 24_000;
 const MAX_HISTORY_MESSAGES = 40;
@@ -11,6 +14,41 @@ function codePointCountWithin(value, limit) {
   let count = 0;
   for (const _character of value) if (++count > limit) return -1;
   return count;
+}
+
+const JSON_TYPES = new Set(["object", "array", "string", "number", "integer", "boolean", "null"]);
+function checkSchemaTypes(schema) {
+  if (typeof schema === "boolean") return;
+  if (!schema || typeof schema !== "object" || Array.isArray(schema)) throw new Error("invalid_schema");
+  if (Object.hasOwn(schema, "$ref") &&
+      (typeof schema.$ref !== "string" || !/^#\/(?:\$defs|definitions)\/[^/]+$/.test(schema.$ref))) throw new Error("invalid_schema");
+  if (Object.hasOwn(schema, "type")) {
+    const types = Array.isArray(schema.type) ? schema.type : [schema.type];
+    if (!types.length || types.some((type) => typeof type !== "string" || !JSON_TYPES.has(type))) throw new Error("invalid_schema");
+  }
+  for (const key of ["properties", "patternProperties", "$defs", "definitions", "dependentSchemas"]) {
+    if (schema[key] && typeof schema[key] === "object" && !Array.isArray(schema[key])) {
+      for (const child of Object.values(schema[key])) checkSchemaTypes(child);
+    }
+  }
+  if (schema.dependencies && typeof schema.dependencies === "object" && !Array.isArray(schema.dependencies)) {
+    for (const child of Object.values(schema.dependencies)) if (!Array.isArray(child)) checkSchemaTypes(child);
+  }
+  for (const key of ["items", "additionalProperties", "unevaluatedProperties", "unevaluatedItems", "additionalItems", "contains", "propertyNames", "not", "if", "then", "else"]) {
+    if (schema[key] !== undefined) {
+      if (Array.isArray(schema[key])) for (const child of schema[key]) checkSchemaTypes(child);
+      else checkSchemaTypes(schema[key]);
+    }
+  }
+  for (const key of ["allOf", "anyOf", "oneOf", "prefixItems"]) {
+    if (Array.isArray(schema[key])) for (const child of schema[key]) checkSchemaTypes(child);
+  }
+}
+function safeNumbers(value) {
+  if (typeof value === "number") return Number.isFinite(value) && (!Number.isInteger(value) || Number.isSafeInteger(value));
+  if (Array.isArray(value)) return value.every(safeNumbers);
+  if (value && typeof value === "object") return Object.values(value).every(safeNumbers);
+  return true;
 }
 
 const MODEL = Object.freeze({ id: "host", name: "host", provider: "host", api: "host", baseUrl: "",
@@ -28,26 +66,37 @@ export function contentFromHost(parts, allowed) {
   if (allowed === undefined) throw new TypeError("allowlist_required");
   if (!Array.isArray(parts)) throw new Error("invalid_model_result");
   return parts.map((part) => {
+    if (part?.type === "text" && Object.keys(part).sort().join(",") === "text,type" && typeof part.text === "string") {
+      return { type: "text", text: part.text };
+    }
     if (part?.type === "tool_call" && Object.keys(part).sort().join(",") === "arguments,id,name,type" &&
         typeof part.id === "string" && part.id && typeof part.name === "string" &&
         (!allowed || allowed.has(part.name)) && part.arguments &&
-        typeof part.arguments === "object" && !Array.isArray(part.arguments) && Object.keys(part.arguments).length === 0) {
+        typeof part.arguments === "object" && !Array.isArray(part.arguments)) {
       return { type: "toolCall", id: part.id, name: part.name, arguments: part.arguments };
     }
     throw new Error("invalid_model_result");
   });
 }
 
+export function validToolResult(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value) ||
+      typeof value.final !== "boolean" || typeof value.ok !== "boolean" ||
+      Object.keys(value).sort().join(",") !== "final,ok,result" ||
+      !value.result || typeof value.result !== "object" || Array.isArray(value.result)) return false;
+  try { return Buffer.byteLength(JSON.stringify(value.result), "utf8") <= 256_000; }
+  catch { return false; }
+}
+
 /**
  * `host.request` is a local transport abstraction; it does not grant model or
  * tool access. The bounded prompt and text history are provided to Pi locally.
  * Python must verify complete model responses and authorize every
- * proposed tool call. `tools` contains only host-supplied empty schemas. Model
- * requests use `{}`; tool requests carry only the ID, name and empty arguments.
- * Model `{parts}` contain only empty-argument tool calls with nonempty IDs and
- * names declared in `tools`, never text; `{parts: []}` ends a text-only turn.
- * Tool results contain exactly `{ok, final}`. Each pending request receives its
- * own abort signal, which is detached once the request settles.
+ * proposed tool call. The host supplies schemas, complete validated model text
+ * and tool proposals, and bounded business results over the authenticated local
+ * link. Python remains authoritative for execution, access and receipts.
+ * `model.call` requests are empty; `tool.call` includes the Pi-validated args.
+ * Each pending request receives its own abort signal, detached on settlement.
  */
 export function createTurn(input) {
   if (!input || typeof input !== "object" || Object.keys(input).sort().join(",") !== "history,host,prompt,tools") {
@@ -78,6 +127,8 @@ export function createTurn(input) {
   let expectedCalls = 0;
   let deliveredCalls = 0;
   const names = new Set();
+  const validators = new Map();
+  let originals = new Map();
   const request = async (kind, payload, signal) => {
     const controller = new AbortController();
     const abort = () => controller.abort();
@@ -95,27 +146,29 @@ export function createTurn(input) {
         !tool.parameters || typeof tool.parameters !== "object" || Array.isArray(tool.parameters) ||
         names.has(tool.name) || tool.parameters.type !== "object" || tool.parameters.additionalProperties !== false ||
         !tool.parameters.properties || typeof tool.parameters.properties !== "object" ||
-        Array.isArray(tool.parameters.properties) || Object.keys(tool.parameters.properties).length !== 0 ||
-        Object.keys(tool.parameters).sort().join(",") !== "additionalProperties,properties,type") {
+        Array.isArray(tool.parameters.properties)) {
       throw new TypeError("invalid_tool_definition");
     }
+    try { checkSchemaTypes(tool.parameters); validators.set(tool.name, compile(tool.parameters, { formats })); }
+    catch { throw new TypeError("invalid_tool_definition"); }
     names.add(tool.name);
     return {
       name: tool.name, label: tool.name, description: tool.description, parameters: tool.parameters,
-      execute: async (id, _args, signal) => {
+      execute: async (id, args, signal) => {
         if (finished || signal?.aborted) throw new Error("turn_finished");
         try {
-          deliveredCalls += 1;
-          const value = await request("tool.call", { tool_call_id: id, name: tool.name, arguments: {} }, signal);
-          if (!value || typeof value !== "object" || Array.isArray(value) || typeof value.final !== "boolean" ||
-              typeof value.ok !== "boolean" || Object.keys(value).sort().join(",") !== "final,ok") {
-            throw new Error("invalid_tool_result");
+          const original = originals.get(id);
+          if (!original || original.name !== tool.name || !isDeepStrictEqual(args, original.arguments)) {
+            throw new Error("tool_arguments_changed");
           }
+          deliveredCalls += 1;
+          const value = await request("tool.call", { tool_call_id: id, name: tool.name, arguments: original.arguments }, signal);
+          if (!validToolResult(value)) throw new Error("invalid_tool_result");
           if (value.final) {
             finished = true;
             agent.abort();
           }
-          return { content: [{ type: "text", text: value.ok ? "ok" : "failed" }], details: {},
+          return { content: [{ type: "text", text: JSON.stringify(value.result) }], details: {},
             isError: !value.ok, terminate: value.final };
         } catch (error) {
           finished = true;
@@ -136,7 +189,19 @@ export function createTurn(input) {
         const result = await request("model.call", {}, signal);
         if (signal?.aborted) throw new Error("aborted");
         const content = contentFromHost(result?.parts, names);
-        expectedCalls = content.length;
+        // Reject invalid, duplicated or SDK-coerced calls before the first tool.
+        const batch = new Map();
+        for (const part of content) {
+          if (part.type !== "toolCall") continue;
+          const tool = mappedTools.find((item) => item.name === part.name);
+          if (batch.has(part.id) || !safeNumbers(part.arguments) || !validators.get(part.name).check(part.arguments) ||
+              !isDeepStrictEqual(validateToolArguments(tool, part), part.arguments)) {
+            throw new Error("invalid_tool_arguments");
+          }
+          batch.set(part.id, { name: part.name, arguments: structuredClone(part.arguments) });
+        }
+        originals = batch;
+        expectedCalls = content.filter((part) => part.type === "toolCall").length;
         deliveredCalls = 0;
         const message = assistant(content, content.some((part) => part.type === "toolCall") ? "toolUse" : "stop");
         stream.push({ type: "done", reason: message.stopReason, message });

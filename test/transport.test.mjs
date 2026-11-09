@@ -43,13 +43,13 @@ async function pair() {
       });
     },
     send(type, turn_id, request_id, payload = {}) {
-      peer.send(JSON.stringify({ version: 1, type, sequence: ++sequence, turn_id, request_id, payload }));
+      peer.send(JSON.stringify({ version: 2, type, sequence: ++sequence, turn_id, request_id, payload }));
     },
     async close() { connection.close(); await new Promise((resolve) => server.close(resolve)); },
   };
 }
 
-test("real local socket runs one verified write and sends no private data", { timeout: 10_000 }, async () => {
+test("real local socket runs one verified write", { timeout: 10_000 }, async () => {
   const p = await pair();
   try {
     p.send("turn.start", "attempt-1", "start-1", { prompt: "当前创作目标", history: [], tools: [tool] });
@@ -64,7 +64,7 @@ test("real local socket runs one verified write and sends no private data", { ti
     const call = await p.next();
     assert.equal(call.type, "tool.call");
     assert.deepEqual(call.payload, { tool_call_id: "call-1", name: "write", arguments: {} });
-    p.send("tool.result", "attempt-1", call.request_id, { ok: true, final: true });
+    p.send("tool.result", "attempt-1", call.request_id, { ok: true, final: true, result: { ok: true } });
     assert.equal((await p.next()).type, "turn.end");
     assert.equal(p.connection.connected, true);
   } finally { await p.close(); }
@@ -90,7 +90,7 @@ test("invalid request association and out-of-order frames close the connection",
       await p.next();
       const closed = once(p.peer, "close");
       if (invalid === "request") p.send("model.result", "attempt-1", "forged", { parts: [] });
-      else p.peer.send(JSON.stringify({ version: 1, type: "model.result", sequence: 99,
+      else p.peer.send(JSON.stringify({ version: 2, type: "model.result", sequence: 99,
         turn_id: "attempt-1", request_id: "m", payload: { parts: [] } }));
       await closed;
       assert.equal(p.connection.connected, false);
@@ -125,7 +125,7 @@ test("cancelling one concurrent turn tolerates its late reply and preserves anot
       const item = await p.next();
       if (item.type === "tool.call") {
         assert.equal(item.turn_id, "b");
-        p.send("tool.result", "b", item.request_id, { ok: true, final: true });
+        p.send("tool.result", "b", item.request_id, { ok: true, final: true, result: { ok: true } });
       } else if (item.type === "turn.end") ends.add(item.turn_id);
       else assert.fail(`unexpected message: ${item.type}`);
     }
@@ -145,7 +145,7 @@ test("tool reply after cancellation is ignored without closing the connection", 
     const pending = await p.next();
     assert.equal(pending.type, "tool.call");
     p.send("turn.abort", "a", "abort");
-    p.send("tool.result", "a", pending.request_id, { ok: true, final: true });
+    p.send("tool.result", "a", pending.request_id, { ok: true, final: true, result: { ok: true } });
     assert.equal((await p.next()).type, "turn.end");
     assert.equal(p.connection.connected, true);
   } finally { await p.close(); }
@@ -206,7 +206,7 @@ test("a mismatched late reply is rejected", { timeout: 10_000 }, async () => {
     await p.next();
     const model = await p.next();
     p.send("turn.abort", "a", "abort");
-    p.send("tool.result", "a", model.request_id, { ok: true, final: true });
+    p.send("tool.result", "a", model.request_id, { ok: true, final: true, result: { ok: true } });
     assert.equal(await p.connection.closed, "protocol_error");
   } finally { await p.close(); }
 });
@@ -243,14 +243,14 @@ test("cancelled model write proposal is ignored and cannot be repeated", { timeo
   } finally { await p.close(); }
 });
 
-test("late model results containing private content are rejected", { timeout: 10_000 }, async () => {
+test("late malformed model results are rejected", { timeout: 10_000 }, async () => {
   const p = await pair();
   try {
     p.send("turn.start", "a", "start", { prompt: "当前创作目标", history: [], tools: [] });
     await p.next();
     const model = await p.next();
     p.send("turn.abort", "a", "abort");
-    p.send("model.result", "a", model.request_id, { parts: [{ type: "text", text: "private" }] });
+    p.send("model.result", "a", model.request_id, { parts: [{ type: "text", text: "private", extra: true }] });
     assert.equal(await p.connection.closed, "protocol_error");
   } finally { await p.close(); }
 });
@@ -298,5 +298,67 @@ test("local socket accepts CJK and emoji history", { timeout: 10000 }, async () 
     p.send("model.result", "a", model.request_id, { parts: [] });
     assert.equal((await p.next()).type, "turn.end");
     assert.equal(p.connection.connected, true);
+  } finally { await p.close(); }
+});
+
+
+test("socket forwards nonempty arguments and accepts text-only model completion", { timeout: 10000 }, async () => {
+  const p = await pair();
+  const named = { ...tool, parameters: { type: "object", properties: { episode: { type: "integer" } }, required: ["episode"], additionalProperties: false } };
+  try {
+    p.send("turn.start", "a", "start", { prompt: "生成", history: [], tools: [named] });
+    assert.equal((await p.next()).type, "turn.accept");
+    const model = await p.next();
+    p.send("model.result", "a", model.request_id, { parts: [{ type: "text", text: "正在创建" },
+      { type: "tool_call", id: "call", name: "write", arguments: { episode: 2 } }] });
+    const call = await p.next();
+    assert.deepEqual(call.payload.arguments, { episode: 2 });
+    p.send("tool.result", "a", call.request_id, { ok: true, final: false, result: { ok: true, title: "第一集" } });
+    const next = await p.next();
+    assert.equal(next.type, "model.call");
+    p.send("model.result", "a", next.request_id, { parts: [{ type: "text", text: "已完成" }] });
+    assert.equal((await p.next()).type, "turn.end");
+  } finally { await p.close(); }
+});
+
+test("oversized tool result closes the local connection", { timeout: 10000 }, async () => {
+  const p = await pair();
+  try {
+    p.send("turn.start", "a", "start", { prompt: "生成", history: [], tools: [tool] });
+    await p.next(); const model = await p.next();
+    p.send("model.result", "a", model.request_id, { parts: [{ type: "tool_call", id: "call", name: "write", arguments: {} }] });
+    const call = await p.next();
+    p.send("tool.result", "a", call.request_id, { ok: true, final: false, result: { text: "x".repeat(256001) } });
+    assert.equal(await p.connection.closed, "protocol_error");
+  } finally { await p.close(); }
+});
+
+test("late valid text result after cancellation is discarded", { timeout: 10000 }, async () => {
+  const p = await pair();
+  try {
+    p.send("turn.start", "a", "start", { prompt: "生成", history: [], tools: [] });
+    await p.next(); const model = await p.next();
+    p.send("turn.abort", "a", "abort");
+    assert.equal((await p.next()).type, "turn.end");
+    p.send("model.result", "a", model.request_id, { parts: [{ type: "text", text: "已取消" }] });
+    p.send("turn.start", "b", "next", { prompt: "继续", history: [], tools: [] });
+    assert.equal((await p.next()).type, "turn.accept");
+    const next = await p.next();
+    p.send("model.result", "b", next.request_id, { parts: [] });
+    assert.equal((await p.next()).type, "turn.end");
+    assert.equal(p.connection.connected, true);
+  } finally { await p.close(); }
+});
+
+
+test("old protocol is rejected before requesting a model", { timeout: 10_000 }, async () => {
+  const p = await pair();
+  try {
+    const closed = once(p.peer, "close");
+    p.peer.send(JSON.stringify({ version: 1, type: "turn.start", sequence: 1,
+      turn_id: "attempt-1", request_id: "start-1", payload: { prompt: "目标", history: [], tools: [] } }));
+    await closed;
+    assert.equal(p.connection.connected, false);
+    await assert.rejects(p.next(), /frame_timeout/);
   } finally { await p.close(); }
 });
