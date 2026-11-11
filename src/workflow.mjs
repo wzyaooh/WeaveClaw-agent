@@ -74,7 +74,12 @@ function facts(result, episode) {
   };
 }
 
-export function createWorkflow(toolNames, last_episode = null) {
+export function createWorkflow(toolNames, last_episode = null, batch = null) {
+  if (batch !== null && (!Number.isSafeInteger(batch.start) || !Number.isSafeInteger(batch.end) ||
+      batch.start < 1 || batch.end > 10000 || batch.start > batch.end)) throw new RangeError("invalid_batch");
+  // Copy caller-owned bounds; each episode requires its own fresh facts.
+  const range = batch === null ? null : { start: batch.start, end: batch.end };
+  let current = range?.start;
   const available = [...toolNames];
   let progress = null;
   return {
@@ -89,10 +94,16 @@ export function createWorkflow(toolNames, last_episode = null) {
     },
     observe(name, args, value) {
       if (name === "weaveclaw_get_creation_progress") {
+        if (range && (current > range.end || args?.episode !== current)) return;
         progress = value?.ok === true && value.final === false ? facts(value.result, args?.episode) : null;
+        if (range && progress && progress.active.size === 0 && completion(progress).step === STEPS.size) {
+          current++;
+          if (current <= range.end) progress = null;
+        }
       }
     },
     plan() {
+      const batchState = range ? { batch: { ...range, current } } : {};
       const allowed = new Set();
       let reason = null, next = null, checkpoint = false;
       if (progress) {
@@ -145,12 +156,13 @@ export function createWorkflow(toolNames, last_episode = null) {
       }
       const tools = available.filter((name) => !STEPS.has(name) || allowed.has(name));
       const feedback = completion(progress);
-      if (!progress && last_episode !== null && tools.includes("weaveclaw_get_creation_progress")) {
+      const target = range ? current : last_episode;
+      if (!progress && target !== null && tools.includes("weaveclaw_get_creation_progress")) {
         // last_episode identifies the target only. Read its facts before writes.
-        return { tools, plan: { episode: last_episode, next_tool: "weaveclaw_get_creation_progress", reason: "progress_required" }, progress: feedback };
+        return { tools, plan: { episode: target, next_tool: "weaveclaw_get_creation_progress", reason: "progress_required" }, progress: feedback, ...batchState };
       }
-      if (next && !tools.includes(next)) return { tools, plan: null, progress: feedback };
-      return { tools, plan: reason ? { episode: progress.ep.number, next_tool: next, reason, ...(checkpoint ? { checkpoint: true } : {}) } : null, progress: feedback };
+      if (next && !tools.includes(next)) return { tools, plan: null, progress: feedback, ...batchState };
+      return { tools, plan: reason ? { episode: progress.ep.number, next_tool: next, reason, ...(checkpoint ? { checkpoint: true } : {}) } : null, progress: feedback, ...batchState };
     },
   };
 }

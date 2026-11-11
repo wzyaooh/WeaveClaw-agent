@@ -13,6 +13,93 @@ const initial = () => ({ version: 1, source: { uploads: 0, imported: false }, pr
 const observe = (workflow, data) => workflow.observe("weaveclaw_get_creation_progress", { episode: 1 },
   { ok: true, final: false, result: { ok: true, data } });
 
+function batchProgress(workflow, number, completed = false) {
+  const data = initial();
+  data.source.imported = true;
+  Object.assign(data.project, { characters: 1, episodes: 5 });
+  Object.assign(data.episode, { number, exists: true, identity_planned: true });
+  if (completed) Object.assign(data.episode, {
+    beats: 1, all_beats_have_content: true, identity_detected: 1,
+    video_prompt_present: 1, first_frames_present: 1, audio_present: 1,
+    video_present: 1, composed: true,
+  });
+  workflow.observe(names[0], { episode: number }, { ok: true, final: false, result: { ok: true, data } });
+  return data;
+}
+
+test("批量范围从 start 开始，忽略 last_episode 且不修改调用方范围", () => {
+  const batch = { start: 2, end: 5 }, workflow = createWorkflow(names, 4, batch);
+  batch.start = 4;
+  const proposal = workflow.plan();
+  assert.deepEqual(proposal.batch, { start: 2, end: 5, current: 2 });
+  assert.deepEqual(proposal.plan, { episode: 2, next_tool: names[0], reason: "progress_required" });
+  proposal.batch.current = 5;
+  batchProgress(workflow, 2);
+  assert.equal(workflow.plan().batch.current, 2);
+  assert.equal(workflow.plan().plan.reason, "script_required");
+  assert.deepEqual(workflow.plan(), workflow.plan());
+});
+
+test("当前集完成后只推进一集，重新读事实前不解锁写工具", () => {
+  const workflow = createWorkflow(names, null, { start: 1, end: 3 });
+  batchProgress(workflow, 1, true);
+  const proposal = workflow.plan();
+  assert.deepEqual(proposal.batch, { start: 1, end: 3, current: 2 });
+  assert.deepEqual(proposal.plan, { episode: 2, next_tool: names[0], reason: "progress_required" });
+  assert.deepEqual(proposal.tools, [names[0], "read_other"]);
+  assert.equal(workflow.allows("weaveclaw_generate_script", { episode: 2 }), false);
+  // Late duplicate and out-of-order replies cannot advance or replace current facts.
+  batchProgress(workflow, 1, true);
+  batchProgress(workflow, 3, true);
+  assert.deepEqual(workflow.plan(), proposal);
+  batchProgress(workflow, 2);
+  assert.equal(workflow.plan().plan.episode, 2);
+  assert.equal(workflow.plan().plan.reason, "script_required");
+});
+
+test("全部集完成后 current 超出 end 且返回末集 delivery，重复规划保持稳定", () => {
+  for (const end of [1, 3]) {
+    const workflow = createWorkflow(names, null, { start: 1, end });
+    for (let episode = 1; episode <= end; episode++) batchProgress(workflow, episode, true);
+    const proposal = workflow.plan();
+    assert.deepEqual(proposal.batch, { start: 1, end, current: end + 1 });
+    assert.deepEqual(proposal.plan, { episode: end, next_tool: "weaveclaw_get_final_video", reason: "delivery" });
+    assert.equal(proposal.progress.percent, 100);
+    assert.deepEqual(workflow.plan(), proposal);
+    batchProgress(workflow, end, true);
+    assert.deepEqual(workflow.plan(), proposal);
+  }
+});
+
+test("批量规划不凭写回执、失败、执行中或前置缺失推进", () => {
+  const workflow = createWorkflow(names, null, { start: 1, end: 2 });
+  const data = batchProgress(workflow, 1, true);
+  // Use a new workflow to check that composed alone is insufficient.
+  const pending = createWorkflow(names, null, { start: 1, end: 2 });
+  const refresh = () => pending.observe(names[0], { episode: 1 }, { ok: true, final: false, result: { ok: true, data } });
+  data.active_steps = ["compose"]; refresh();
+  assert.equal(pending.plan().batch.current, 1);
+  assert.equal(pending.plan().plan.reason, "await_task");
+  data.active_steps = []; data.episode.sketches_stale = 1; refresh();
+  assert.equal(pending.plan().batch.current, 1);
+  pending.observe("weaveclaw_compose_episode", { episode: 1 }, { ok: true });
+  assert.equal(pending.plan().batch.current, 1);
+  pending.observe(names[0], { episode: 1 }, { ok: false });
+  assert.equal(pending.plan().batch.current, 1);
+  assert.equal(pending.plan().plan.reason, "progress_required");
+});
+
+test("批量参数拒绝非法边界，缺省时保持既有输出契约", () => {
+  for (const batch of [{}, { start: 0, end: 2 }, { start: 3, end: 2 },
+    { start: 1, end: 10001 }, { start: 1.5, end: 2 }, { start: "1", end: 2 }]) {
+    assert.throws(() => createWorkflow(names, null, batch), /invalid_batch/);
+  }
+  assert.equal(Object.hasOwn(createWorkflow(names).plan(), "batch"), false);
+  assert.equal(Object.hasOwn(createWorkflow(names, null, null).plan(), "batch"), false);
+  assert.deepEqual(createWorkflow([], null, { start: 1, end: 2 }).plan().batch,
+    { start: 1, end: 2, current: 1 });
+});
+
 test("多个工具前置满足时同时暴露，未满足的下游工具仍隐藏", () => {
   const workflow = createWorkflow(names), data = initial();
   data.source.imported = true;

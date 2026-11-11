@@ -107,3 +107,5 @@
 | 成片展示 | `ep.composed === true` |
 
 > P3-C（智能重试）：需宿主协议扩展错误分类字段（schema_error/timeout/rate_limit），暂未实现。
+
+> P3-F 跨轮自动续跑需宿主续轮支持，当前仅实现单轮内批量规划。
