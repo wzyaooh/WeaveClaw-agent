@@ -18,6 +18,33 @@ const STEPS = new Map([
 const ACTIVE = new Set(STEPS.values());
 const count = (x) => Number.isSafeInteger(x) && x >= 0;
 
+function completion(progress) {
+  let step = 0;
+  if (progress) {
+    const { source, project, ep, active } = progress;
+    const beatsReady = ep.beats > 0;
+    const sketchesReady = beatsReady && ep.sketches_missing === 0 && ep.sketches_stale === 0;
+    // Coloring has no separate completion fact; ready sketches certify both
+    // coloring and generation. Never infer completion from a write receipt.
+    const completed = [
+      source.imported, project.characters > 0, project.episodes > 0 && ep.exists,
+      ep.identity_planned, beatsReady && ep.all_beats_have_content,
+      sketchesReady, sketchesReady, beatsReady && ep.identity_detected === ep.beats,
+      beatsReady && ep.video_prompt_present === ep.beats,
+      beatsReady && ep.first_frames_present === ep.beats,
+      beatsReady && ep.audio_present === ep.beats,
+      beatsReady && ep.video_present === ep.beats, ep.composed, ep.composed,
+    ];
+    // Count the completed prefix, so stale downstream artifacts cannot hide a
+    // missing prerequisite. Delivery is 100% once the final artifact is ready.
+    for (const [index, stage] of [...STEPS.values()].entries()) {
+      if (!completed[index] || (stage !== "delivery" && active.has(stage))) break;
+      step++;
+    }
+  }
+  return { step, total: STEPS.size, percent: Math.round(step / STEPS.size * 100) };
+}
+
 function facts(result, episode) {
   const data = result?.ok === true && result?.data;
   const { source, project, episode: ep, active_steps: active } = data || {};
@@ -114,12 +141,13 @@ export function createWorkflow(toolNames, last_episode = null) {
         else [reason, next] = ["delivery", "weaveclaw_get_final_video"];
       }
       const tools = available.filter((name) => !STEPS.has(name) || allowed.has(name));
+      const feedback = completion(progress);
       if (!progress && last_episode !== null && tools.includes("weaveclaw_get_creation_progress")) {
         // last_episode identifies the target only. Read its facts before writes.
-        return { tools, plan: { episode: last_episode, next_tool: "weaveclaw_get_creation_progress", reason: "progress_required" } };
+        return { tools, plan: { episode: last_episode, next_tool: "weaveclaw_get_creation_progress", reason: "progress_required" }, progress: feedback };
       }
-      if (next && !tools.includes(next)) return { tools, plan: null };
-      return { tools, plan: reason ? { episode: progress.ep.number, next_tool: next, reason, ...(checkpoint ? { checkpoint: true } : {}) } : null };
+      if (next && !tools.includes(next)) return { tools, plan: null, progress: feedback };
+      return { tools, plan: reason ? { episode: progress.ep.number, next_tool: next, reason, ...(checkpoint ? { checkpoint: true } : {}) } : null, progress: feedback };
     },
   };
 }

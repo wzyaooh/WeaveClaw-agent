@@ -13,6 +13,65 @@ const initial = () => ({ version: 1, source: { uploads: 0, imported: false }, pr
 const observe = (workflow, data) => workflow.observe("weaveclaw_get_creation_progress", { episode: 1 },
   { ok: true, final: false, result: { ok: true, data } });
 
+test("progress 按最新事实计算已完成工具数与四舍五入百分比", () => {
+  const workflow = createWorkflow(names), data = initial();
+  const expect = (step, percent) => {
+    observe(workflow, data);
+    assert.deepEqual(workflow.plan().progress, { step, total: 14, percent });
+  };
+  expect(0, 0);
+  data.source.uploads = 1; expect(0, 0);
+  data.source.imported = true; expect(1, 7);
+  data.project.characters = 1; expect(2, 14);
+  data.project.episodes = 1; data.episode.exists = true; expect(3, 21);
+  data.episode.identity_planned = true; expect(4, 29);
+  Object.assign(data.episode, { beats: 2, all_beats_have_content: true, sketches_missing: 1 });
+  expect(5, 36);
+  data.episode.sketches_missing = 0; expect(7, 50);
+  data.episode.identity_detected = 2; expect(8, 57);
+  data.episode.video_prompt_present = 2; expect(9, 64);
+  data.episode.first_frames_present = 2; expect(10, 71);
+  assert.equal(workflow.plan().plan.reason, "review_first_frames");
+  assert.deepEqual(workflow.plan().progress, { step: 10, total: 14, percent: 71 });
+  data.episode.audio_present = 1; expect(10, 71);
+  assert.equal(workflow.plan().plan.reason, "audio_required");
+  data.episode.audio_present = 2; expect(11, 79);
+  data.episode.video_present = 2; expect(12, 86);
+  data.episode.composed = true; expect(14, 100);
+  assert.equal(workflow.plan().plan.reason, "delivery");
+  // A newly missing prerequisite must invalidate downstream completion.
+  data.episode.sketches_stale = 1; expect(5, 36);
+});
+
+test("执行中不计为完成，刷新失败清空进度，重连从事实恢复", () => {
+  const data = initial(), workflow = createWorkflow(names, 1);
+  Object.assign(data, { source: { uploads: 1, imported: true }, project: { characters: 1, episodes: 1 } });
+  Object.assign(data.episode, { exists: true, identity_planned: true, beats: 2, all_beats_have_content: true, sketches_missing: 2 });
+  data.active_steps = ["script"];
+  observe(workflow, data);
+  assert.equal(workflow.plan().plan.reason, "await_task");
+  assert.deepEqual(workflow.plan().progress, { step: 4, total: 14, percent: 29 });
+  data.active_steps = [];
+  observe(workflow, data);
+  assert.deepEqual(workflow.plan().progress, { step: 5, total: 14, percent: 36 });
+  const resumed = createWorkflow(names, 1);
+  observe(resumed, data);
+  assert.deepEqual(resumed.plan().progress, workflow.plan().progress);
+  workflow.observe(names[0], { episode: 1 }, { ok: false, final: false });
+  assert.deepEqual(workflow.plan().progress, { step: 0, total: 14, percent: 0 });
+});
+
+test("未读取事实及下一工具不可用时仍包含 progress", () => {
+  for (const last_episode of [null, 1]) {
+    assert.deepEqual(createWorkflow(names, last_episode).plan().progress, { step: 0, total: 14, percent: 0 });
+  }
+  const workflow = createWorkflow([names[0]]), data = initial();
+  data.source.imported = true;
+  observe(workflow, data);
+  assert.equal(workflow.plan().plan, null);
+  assert.deepEqual(workflow.plan().progress, { step: 1, total: 14, percent: 7 });
+});
+
 test("三个 sketches 工具仅在目标集进度中存在角色时允许执行", () => {
   const workflow = createWorkflow(names), data = initial();
   const sketches = ["weaveclaw_assign_sketch_colors", "weaveclaw_generate_sketches", "weaveclaw_detect_sketch_identities"];
@@ -65,7 +124,7 @@ test("resumed episode only suggests reading progress and fresh target facts take
   const workflow = createWorkflow(names, 7);
   const fallback = { tools: [names[0], "read_other"], plan: {
     episode: 7, next_tool: names[0], reason: "progress_required",
-  } };
+  }, progress: { step: 0, total: 14, percent: 0 } };
   assert.deepEqual(workflow.plan(), fallback);
   assert.equal(workflow.allows("weaveclaw_generate_script", { episode: 7 }), false);
   const data = initial();
@@ -188,12 +247,13 @@ test("恢复时已有任务只等待，进度刷新失败则重新读取而不�
   assert.deepEqual(workflow.plan(), {
     tools: [names[0], "read_other"],
     plan: { episode: 1, next_tool: names[0], reason: "progress_required" },
+    progress: { step: 0, total: 14, percent: 0 },
   });
 });
 
 test("workflow hides pipeline writes until it receives valid target progress", () => {
   const workflow = createWorkflow(names);
-  assert.deepEqual(workflow.plan(), { tools: [names[0], "read_other"], plan: null });
+  assert.deepEqual(workflow.plan(), { tools: [names[0], "read_other"], plan: null, progress: { step: 0, total: 14, percent: 0 } });
   const data = initial();
   data.episode.number = 2;
   observe(workflow, data);
@@ -277,14 +337,14 @@ test("invalid or failed progress cannot unlock writes or inject plan text", () =
   const workflow = createWorkflow(names), data = initial();
   data.source.imported = "yes";
   observe(workflow, data);
-  assert.deepEqual(workflow.plan(), { tools: [names[0], "read_other"], plan: null });
+  assert.deepEqual(workflow.plan(), { tools: [names[0], "read_other"], plan: null, progress: { step: 0, total: 14, percent: 0 } });
   data.source.imported = true; data.project.characters = 1;
   data.episode.private = "do not echo";
   observe(workflow, data);
   assert.equal(JSON.stringify(workflow.plan()).includes("do not echo"), false);
   workflow.observe("weaveclaw_get_creation_progress", { episode: 1 }, { ok: false, final: false, result: { ok: false } });
   // A failed refresh must not continue on stale facts.
-  assert.deepEqual(workflow.plan(), { tools: [names[0], "read_other"], plan: null });
+  assert.deepEqual(workflow.plan(), { tools: [names[0], "read_other"], plan: null, progress: { step: 0, total: 14, percent: 0 } });
 });
 
 test("a missing target episode in an existing plan does not trigger replanning", () => {
@@ -365,10 +425,10 @@ test("out-of-range new fields in progress response are rejected", () => {
   Object.assign(data.episode, { beats: 2, video_prompt_present: 5 }); // 5 > beats=2
   observe(workflow, data);
   // Invalid data must not unlock anything.
-  assert.deepEqual(workflow.plan(), { tools: [names[0], "read_other"], plan: null });
+  assert.deepEqual(workflow.plan(), { tools: [names[0], "read_other"], plan: null, progress: { step: 0, total: 14, percent: 0 } });
   data.episode.video_prompt_present = -1;
   observe(workflow, data);
-  assert.deepEqual(workflow.plan(), { tools: [names[0], "read_other"], plan: null });
+  assert.deepEqual(workflow.plan(), { tools: [names[0], "read_other"], plan: null, progress: { step: 0, total: 14, percent: 0 } });
 });
 
 test("review_first_frames 可选检查点在首帧就绪后出现且不阻断流水线", () => {
@@ -487,7 +547,7 @@ test("新字段边界值 0 与等于 beats 均可通过校验", () => {
 
 test("新字段越界或非法值使目标集进度失效", () => {
   const workflow = createWorkflow(names);
-  const hidden = { tools: [names[0], "read_other"], plan: null };
+  const hidden = { tools: [names[0], "read_other"], plan: null, progress: { step: 0, total: 14, percent: 0 } };
   const rejects = (field, value) => {
     const probe = initial();
     probe.episode.beats = 2;

@@ -87,7 +87,7 @@ test("Pi asks the host for model and tool work and stops after a write", async (
   const turn = createTurn({ scope: "project", prompt: "当前创作目标", history: [], tools: [write], host });
   assert.deepEqual(await turn.run(), { aborted: false, error: undefined });
   assert.deepEqual(host.requests, [
-    { kind: "model.call", payload: { context: [{ ref: "prompt" }], tools: ["write_project"], plan: null } },
+    { kind: "model.call", payload: { context: [{ ref: "prompt" }], tools: ["write_project"], plan: null, progress: { step: 0, total: 14, percent: 0 } } },
     { kind: "tool.call", payload: { tool_call_id: "tool-1", name: "write_project", arguments: {} } },
   ]);
   await assert.rejects(turn.run(), /turn_already_used/);
@@ -99,7 +99,7 @@ test("Pi returns a read result to the host before the next model call", async ()
   assert.equal(output.error, undefined);
   assert.deepEqual(host.requests.map((item) => item.kind), ["model.call", "tool.call", "model.call"]);
   assert.deepEqual(host.requests[2].payload, { context: [{ ref: "prompt" }, { ref: "response", index: 1 },
-    { ref: "tool", response: 1, id: "tool-1" }], tools: ["read_project"], plan: null });
+    { ref: "tool", response: 1, id: "tool-1" }], tools: ["read_project"], plan: null, progress: { step: 0, total: 14, percent: 0 } });
 });
 
 test("Pi keeps repeated tool IDs distinct across response rounds", async () => {
@@ -108,7 +108,7 @@ test("Pi keeps repeated tool IDs distinct across response rounds", async () => {
   assert.equal(output.error, undefined);
   assert.deepEqual(host.requests[4].payload, { context: [{ ref: "prompt" },
     { ref: "response", index: 1 }, { ref: "tool", response: 1, id: "tool-1" },
-    { ref: "response", index: 2 }, { ref: "tool", response: 2, id: "tool-1" }], tools: ["read_project"], plan: null });
+    { ref: "response", index: 2 }, { ref: "tool", response: 2, id: "tool-1" }], tools: ["read_project"], plan: null, progress: { step: 0, total: 14, percent: 0 } });
 });
 
 test("Pi projects every acknowledged tool in a complete batch", async () => {
@@ -117,7 +117,7 @@ test("Pi projects every acknowledged tool in a complete batch", async () => {
   const output = await createTurn({ scope: "project", prompt: "目标", history: [], tools: [tool], host }).run();
   assert.equal(output.error, undefined);
   assert.deepEqual(host.requests[3].payload, { context: [{ ref: "prompt" }, { ref: "response", index: 1 },
-    { ref: "tool", response: 1, id: "tool-1" }, { ref: "tool", response: 1, id: "tool-2" }], tools: ["read_project"], plan: null });
+    { ref: "tool", response: 1, id: "tool-1" }, { ref: "tool", response: 1, id: "tool-2" }], tools: ["read_project"], plan: null, progress: { step: 0, total: 14, percent: 0 } });
 });
 
 test("a failed model or tool request stops without another host call", async () => {
@@ -257,7 +257,7 @@ test("Pi receives the bounded host conversation and current creative goal", asyn
       { role: "user", text: "先检查素材" }, { role: "assistant", text: "已检查" },
     ] });
     assert.deepEqual(host.requests[0].payload, { context: [{ ref: "history", index: 0 },
-      { ref: "history", index: 1 }, { ref: "prompt" }], tools: [], plan: null });
+      { ref: "history", index: 1 }, { ref: "prompt" }], tools: [], plan: null, progress: { step: 0, total: 14, percent: 0 } });
   } finally { Agent.prototype.prompt = originalPrompt; }
 });
 
@@ -308,7 +308,7 @@ test("Pi uses host model text, validated tool arguments and read results in its 
     const output = await createTurn({ scope: "project", prompt: "检查第一集", history: [], tools: [{ ...tool, parameters: schema }], host }).run();
     assert.equal(output.error, undefined);
     assert.deepEqual(calls[2].payload, { context: [{ ref: "prompt" }, { ref: "response", index: 1 },
-      { ref: "tool", response: 1, id: "read-1" }], tools: ["read_project"], plan: null });
+      { ref: "tool", response: 1, id: "read-1" }], tools: ["read_project"], plan: null, progress: { step: 0, total: 14, percent: 0 } });
     assert.ok(!JSON.stringify(calls[2].payload).includes("第一集"));
     assert.deepEqual(calls[1], { kind: "tool.call", payload: { tool_call_id: "read-1", name: "read_project", arguments: { episode: 2 } } });
     assert.ok(JSON.stringify(seenContext).includes("第一集"));
