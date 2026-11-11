@@ -466,6 +466,7 @@ test("resumed episode only suggests reading progress and fresh target facts take
 test("重连读取目标集后从首个未完成步骤续接，不依赖本轮完成历史", () => {
   const data = initial();
   data.episode.number = 7;
+  data.episode.exists = true;
   const cases = [
     [() => { data.source = { uploads: 1, imported: true }; }, "weaveclaw_build_characters"],
     [() => { data.project.characters = 2; }, "weaveclaw_plan_episodes"],
@@ -495,6 +496,16 @@ test("重连读取目标集后从首个未完成步骤续接，不依赖本轮�
     assert.deepEqual(workflow.plan(), proposal);
     if (data.episode.composed) assert.equal(proposal.plan.reason, "delivery");
   }
+});
+
+test("记忆中的集数已删除时停止续接并请求用户选择", () => {
+  const data = initial();
+  data.episode.number = 7;
+  data.episode.exists = false;
+  const workflow = createWorkflow(names, 7);
+  workflow.observe(names[0], { episode: 7 }, { ok: true, final: false, result: { ok: true, data: freshFixture(data) } });
+  assert.deepEqual(workflow.plan().plan, { episode: 7, next_tool: null, reason: "episode_missing", checkpoint: true });
+  assert.equal(workflow.allows("weaveclaw_generate_script", { episode: 7 }), false);
 });
 
 test("手动完成当前步骤后刷新进度，plan 跳过该步骤", () => {

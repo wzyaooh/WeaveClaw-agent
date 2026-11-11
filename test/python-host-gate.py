@@ -29,7 +29,7 @@ if not NODE:
 
 class Model:
     profile = SimpleNamespace(supports_tools=True)
-    def __init__(self, expected_reason): self.calls = 0; self.expected_reason = expected_reason
+    def __init__(self, expected_reason, resumed=False): self.calls = 0; self.expected_reason = expected_reason; self.resumed = resumed
     async def request(self, messages, settings, parameters):
         self.calls += 1
         assert '管线顺序：' in messages[0].parts[0].content
@@ -37,9 +37,11 @@ class Model:
         assert messages[1].parts[0].content == 'previous user message'
         if self.calls == 1:
             assert 'weaveclaw_generate_script' not in {item.name for item in parameters.function_tools}
+            if self.resumed:
+                assert 'reason=progress_required' in messages[0].parts[0].content
             return ModelResponse(parts=[TextPart('先读取素材'), ToolCallPart('weaveclaw_get_creation_progress', {'episode': 2}, 'read-1')],
                                  finish_reason='tool_call', model_name='mock')
-        assert 'weaveclaw_generate_script' in {item.name for item in parameters.function_tools}
+        assert ('weaveclaw_generate_script' in {item.name for item in parameters.function_tools}) == (self.expected_reason != 'episode_missing')
         assert f'reason={self.expected_reason}' in messages[0].parts[0].content
         if self.expected_reason == 'await_task':
             assert 'weaveclaw_generate_audio' not in {item.name for item in parameters.function_tools}
@@ -84,11 +86,19 @@ class Dispatcher:
         return {'ok': True, 'result': 'verified'}
 
     async def real_progress(self):
+        if hasattr(self, 'resume_context'):
+            from novelvideo import creation_repository
+            ctx, store = self.resume_context
+            creation_repository.register(ctx.output_dir, ctx.state_dir / 'data.db')
+            try:
+                return await creation_progress(ctx, store, 2)
+            finally:
+                creation_repository._databases.pop(str(ctx.output_dir.resolve()), None)
         output = self.root / self.scenario / 'output'
         state = self.root / self.scenario / 'state'
         output.mkdir(parents=True, exist_ok=True); state.mkdir(parents=True, exist_ok=True)
         (output / 'novel.txt').write_text('fixture', encoding='utf-8')
-        stage = self.scenario.removeprefix('real_')
+        stage = 'audio_accepted' if self.scenario == 'real_resume' else self.scenario.removeprefix('real_')
         beats = [{'beat_number': n, 'narration_segment': 'fixture', 'detected_identities': [NO_CHARACTER_MARKER],
                   'audio_type': 'silence' if n == 2 else 'narration',
                   'video_mode': 'i2v' if stage != 'global_optimize_required' else '',
@@ -151,13 +161,17 @@ class Dispatcher:
             if stage == 'audio_changed':
                 paths.audio(1).write_bytes(b'replaced')
         episode = SimpleNamespace(identity_ids=['fixture'])
+        fixture = self
         class Store:
             def get_all_characters(self): return [object()]
             def get_all_episodes(self): return [episode]
-            def get_episode(self, number): return episode if number == 2 else None
+            def get_episode(self, number): return episode if number == 2 and not getattr(fixture, 'resume_deleted', False) else None
             async def get_beats_as_dicts(self, number): return beats
         ctx = SimpleNamespace(project_id='fixture-project', output_dir=output, state_dir=state)
-        result = await creation_progress(ctx, Store(), 2)
+        store = Store()
+        result = await creation_progress(ctx, store, 2)
+        if self.scenario == 'real_resume':
+            self.resume_context = (ctx, store)
         if stage in ('audio_stale', 'audio_accepted', 'audio_rejected', 'audio_changed'):
             creation_repository._databases.pop(str(output.resolve()), None)
         if stage == 'audio_stale':
@@ -220,8 +234,30 @@ async def main():
             assert len(bindings) == 1 and len(bindings[0]) == 64
             assert result.write_attempted == (scenario == 'script_required')
             assert model.calls == 2 and dispatcher.calls == expected_calls
+        from novelvideo.chat.store import ChatScope, ChatStore
+        class ProjectChat(ChatStore):
+            def db_for(self, username, scope):
+                return Path(temp.name) / 'resume-chat.db'
+        messages, scope = ProjectChat(), ChatScope('project', 'fixture-project')
+        dispatcher = Dispatcher('real_resume', Path(temp.name))
+        from novelvideo.chat.business_session import remember_creation_progress
+        async def remember(name, args, value):
+            await remember_creation_progress(messages, 'user', scope, 'principal', name, args, value)
+        for index, expected in enumerate(('video_required', 'audio_unknown', 'episode_missing')):
+            if index == 1:
+                PathResolver(str(dispatcher.resume_context[0].output_dir), 2).audio(1).write_bytes(b'replaced after interruption')
+            if index == 2:
+                dispatcher.resume_deleted = True
+            last_episode = messages.last_creation_episode('user', scope, 'principal')
+            model = Model(expected, resumed=index > 0)
+            result = await asyncio.wait_for(OrchestratorRuntime(link=app.state.orchestrator_link, model=model,
+                dispatcher=dispatcher, stream=False, on_fresh_read=remember).run('private prompt', scope='project',
+                    bind_strategy=bind_strategy, last_episode=last_episode,
+                    history=[{'role': 'user', 'content': 'previous user message'}]), 10)
+            assert not result.write_attempted and model.calls == 2
+            assert messages.last_creation_episode('user', scope, 'principal') == (2 if index < 2 else None)
         temp.cleanup()
-        print('Python–Pi local WebSocket: verified host write, checkpoint plans and real progress-driven stages')
+        print('Python–Pi local WebSocket: verified host write, checkpoints, fresh cross-turn resume, changed media and deleted episode')
     finally:
         if ELECTRON:
             server.should_exit = True

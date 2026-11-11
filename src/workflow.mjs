@@ -113,6 +113,7 @@ export function createWorkflow(toolNames, last_episode = null, batch = null) {
     allows(name, args) {
       if (!STEPS.has(name)) return true;
       if (!progress || (Object.hasOwn(args, "episode") && args.episode !== progress.ep.number)) return false;
+      if (last_episode === progress.ep.number && !progress.ep.exists && Object.hasOwn(args, "episode")) return false;
       if (STEPS.get(name) === "sketches") return progress.project.characters > 0;
       if (name === "weaveclaw_get_final_video") return progress.ep.beats > 0 &&
         progress.ep.audio_current !== null && progress.ep.audio_current + progress.ep.audio_confirmed === progress.ep.beats &&
@@ -165,7 +166,8 @@ export function createWorkflow(toolNames, last_episode = null, batch = null) {
         permit("weaveclaw_get_final_video", audioReady && videoReady && (ep.composed_freshness === "current" || ep.composition_confirmed));
         // Resume from the first missing prerequisite in fresh facts, not from
         // a session-local cursor; completed stages must not be suggested again.
-        if (active.size) reason = "await_task";
+        if (last_episode === ep.number && !ep.exists) [reason, checkpoint] = ["episode_missing", true];
+        else if (active.size) reason = "await_task";
         else if (!source.imported && !source.uploads) reason = "source_missing";
         else if (!source.imported) [reason, next] = ["ingest_required", "weaveclaw_start_ingest"];
         else if (!project.characters) [reason, next] = ["characters_required", "weaveclaw_build_characters"];
