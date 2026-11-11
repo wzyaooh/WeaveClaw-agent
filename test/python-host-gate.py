@@ -289,6 +289,58 @@ async def main():
             assert result.write_attempted and model.calls == 2
             assert dispatcher.calls == [('weaveclaw_get_creation_progress', {'episode': 2}), (tool, {'episode': 2})]
         from novelvideo.chat.business_tools import BusinessToolDispatcher, BusinessToolError
+        def batch_progress(number, complete):
+            ep = {'number': number, 'exists': True, 'identity_planned': True, 'beats': 1 if complete else 0,
+                  'all_beats_have_content': complete, 'sketches_missing': 0, 'sketches_stale': 0,
+                  'identity_detected': 1 if complete else 0, 'first_frames_present': 1 if complete else 0}
+            if complete:
+                ep.update(video_prompt_present=1, audio_current=1, audio_stale=0, audio_unknown=0, audio_confirmed=0,
+                          video_current=1, video_stale=0, video_unknown=0, video_confirmed=0,
+                          composed=True, composed_freshness='current', composition_confirmed=False)
+            return {'version': 1, 'source': {'uploads': 1, 'imported': True, 'ingest': 'completed'},
+                    'project': {'characters': 1, 'episodes': 2, 'configured': True}, 'episode': ep, 'active_steps': []}
+        class BatchModel(Model):
+            async def request(self, messages, settings, parameters):
+                self.calls += 1
+                system = messages[0].parts[0].content
+                if self.calls <= 2:
+                    assert f'episode={self.calls}; reason=progress_required' in system
+                    return ModelResponse(parts=[ToolCallPart('weaveclaw_get_creation_progress', {'episode': self.calls},
+                        f'progress-{self.calls}')], finish_reason='tool_call', model_name='mock')
+                assert self.calls == 3 and 'episode=2; reason=script_required' in system
+                return ModelResponse(parts=[ToolCallPart('weaveclaw_generate_script', {'episode': 2}, 'script')],
+                                     finish_reason='tool_call', model_name='mock')
+        batch_requests, batch_reads = [], []
+        async def batch_request(method, path, *, query=None, body=None):
+            batch_requests.append((method, path, query))
+            if method == 'GET':
+                number = query['episode']
+                return {'ok': True, 'data': batch_progress(number, number == 1)}
+            return {'ok': True, 'task_id': 'mock-task'}
+        async def batch_save(call_id, tool_id, name, args, value, cost):
+            batch_reads.append((tool_id, args['episode'], value, cost))
+        batch = {'start': 1, 'end': 2, 'current': 1, 'allow_write': True}
+        claim = AsyncMock(return_value=True)
+        dispatcher = BusinessToolDispatcher(project_id='fixture-project', request=batch_request, authorize=AsyncMock(), claim_write=claim)
+        model = BatchModel('batch')
+        result = await asyncio.wait_for(OrchestratorRuntime(link=app.state.orchestrator_link, model=model,
+            dispatcher=dispatcher, stream=False, save_read=batch_save).run('继续批量', scope='project', batch=batch,
+                bind_strategy=bind_strategy, history=[{'role': 'user', 'content': 'previous user message'}]), 10)
+        assert result.write_attempted and model.calls == 3 and [item[0] for item in batch_requests] == ['GET', 'GET', 'POST']
+        assert [(item[0], item[1], item[3]) for item in batch_reads] == [('progress-1', 1, 1), ('progress-2', 2, 1)]
+        claim.assert_awaited_once()
+        # Frozen progress and the accepted write can be replayed without new reads or effects.
+        async def batch_replay(call_id, tool_id, name, args):
+            item = next(item for item in batch_reads if item[0] == tool_id)
+            return {'read_cost': item[3], 'result': item[2]}
+        claim, request = AsyncMock(), AsyncMock()
+        dispatcher = BusinessToolDispatcher(project_id='fixture-project', request=request, authorize=AsyncMock(),
+            claim_write=claim, replay_write=AsyncMock(return_value={'ok': True, 'task_id': 'mock-task'}))
+        result = await asyncio.wait_for(OrchestratorRuntime(link=app.state.orchestrator_link, model=BatchModel('batch'),
+            dispatcher=dispatcher, stream=False, replay_read=batch_replay).run('继续批量', scope='project', batch=batch,
+                bind_strategy=bind_strategy, history=[{'role': 'user', 'content': 'previous user message'}]), 10)
+        assert result.write_attempted and dispatcher.read_count == 2
+        claim.assert_not_awaited(); request.assert_not_awaited()
         class RepairModel(Model):
             def __init__(self, *, valid=False, still_invalid=False):
                 super().__init__('repair')

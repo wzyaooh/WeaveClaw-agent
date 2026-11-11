@@ -163,6 +163,7 @@ test("批量范围从 start 开始，忽略 last_episode 且不修改调用方�
   batch.start = 4;
   const proposal = workflow.plan();
   assert.deepEqual(proposal.batch, { start: 2, end: 5, current: 2 });
+  assert.deepEqual(proposal.batch_episodes, [2, 3, 4, 5]);
   assert.deepEqual(proposal.plan, { episode: 2, next_tool: names[0], reason: "progress_required" });
   proposal.batch.current = 5;
   batchProgress(workflow, 2);
@@ -222,13 +223,36 @@ test("批量规划不凭写回执、失败、执行中或前置缺失推进", ()
 
 test("批量参数拒绝非法边界，缺省时保持既有输出契约", () => {
   for (const batch of [{}, { start: 0, end: 2 }, { start: 3, end: 2 },
-    { start: 1, end: 10001 }, { start: 1.5, end: 2 }, { start: "1", end: 2 }]) {
+    { start: 1, end: 10001 }, { start: 1.5, end: 2 }, { start: "1", end: 2 }, { start: 1, end: 21 },
+    { start: 1, end: 2, current: 3 }, { start: 1, end: 2, allow_write: 1 }]) {
     assert.throws(() => createWorkflow(names, null, batch), /invalid_batch/);
   }
   assert.equal(Object.hasOwn(createWorkflow(names).plan(), "batch"), false);
   assert.equal(Object.hasOwn(createWorkflow(names, null, null).plan(), "batch"), false);
   assert.deepEqual(createWorkflow([], null, { start: 1, end: 2 }).plan().batch,
     { start: 1, end: 2, current: 1 });
+});
+
+test("批次从宿主冻结的当前集恢复，不允许读取其他集", () => {
+  const workflow = createWorkflow(names, 1, { start: 1, end: 3, current: 2, allow_write: true });
+  assert.equal(workflow.plan().batch.current, 2);
+  assert.deepEqual(workflow.plan().batch_episodes, [1, 2, 3]);
+  assert.equal(workflow.allows(names[0], { episode: 1 }), false);
+  assert.equal(workflow.allows(names[0], { episode: 2 }), true);
+});
+
+test("批量读取发现导入失败或仍在运行时不能推进", () => {
+  for (const status of ["running", "failed", "cancelled"]) {
+    const workflow = createWorkflow(names, null, { start: 1, end: 2 });
+    const data = initial();
+    data.source.imported = true; data.source.ingest = status;
+    Object.assign(data.project, { characters: 1, episodes: 2 });
+    Object.assign(data.episode, { exists: true, identity_planned: true, beats: 1, all_beats_have_content: true,
+      sketches_missing: 0, sketches_stale: 0, identity_detected: 1, video_prompt_present: 1,
+      first_frames_present: 1, audio_present: 1, video_present: 1, composed: true });
+    observe(workflow, data);
+    assert.equal(workflow.plan().batch.current, 1);
+  }
 });
 
 test("多个工具前置满足时同时暴露，未满足的下游工具仍隐藏", () => {

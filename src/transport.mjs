@@ -83,7 +83,7 @@ export async function connectHost({ url, token }) {
   };
   const start = (frame) => {
     if (turns.size >= 32 || turns.has(frame.turn_id) || retired.has(frame.turn_id) ||
-        Object.keys(frame.payload).filter((key) => key !== "last_episode").sort().join(",") !== "history,limits,prompt,scope,tools" || !Array.isArray(frame.payload.tools)) {
+        Object.keys(frame.payload).filter((key) => key !== "last_episode" && key !== "batch").sort().join(",") !== "history,limits,prompt,scope,tools" || !Array.isArray(frame.payload.tools)) {
       throw new Error("invalid_turn_start");
     }
     const attempt = { pending: new Map(), cancelled: new Map(), turn: undefined };
@@ -109,7 +109,7 @@ export async function connectHost({ url, token }) {
         }
       });
     } };
-    attempt.turn = createTurn({ tools: frame.payload.tools, prompt: frame.payload.prompt, history: frame.payload.history, scope: frame.payload.scope, limits: frame.payload.limits, last_episode: frame.payload.last_episode, host });
+    attempt.turn = createTurn({ tools: frame.payload.tools, prompt: frame.payload.prompt, history: frame.payload.history, scope: frame.payload.scope, limits: frame.payload.limits, last_episode: frame.payload.last_episode, batch: frame.payload.batch, host });
     turns.set(frame.turn_id, attempt);
     send("turn.accept", frame.turn_id, frame.request_id, { strategy: attempt.turn.strategy,
       capabilities: { parallel_reads: true, preflight_parameter_retry: true } });

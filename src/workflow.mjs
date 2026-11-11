@@ -114,10 +114,12 @@ function facts(result, episode) {
 
 export function createWorkflow(toolNames, last_episode = null, batch = null, scope = "project") {
   if (batch !== null && (!Number.isSafeInteger(batch.start) || !Number.isSafeInteger(batch.end) ||
-      batch.start < 1 || batch.end > 10000 || batch.start > batch.end)) throw new RangeError("invalid_batch");
+      batch.start < 1 || batch.end > 10000 || batch.start > batch.end || batch.end - batch.start + 1 > 20 ||
+      (batch.current !== undefined && (!Number.isSafeInteger(batch.current) || batch.current < batch.start || batch.current > batch.end)) ||
+      (batch.allow_write !== undefined && typeof batch.allow_write !== "boolean"))) throw new RangeError("invalid_batch");
   // Copy caller-owned bounds; each episode requires its own fresh facts.
   const range = batch === null ? null : { start: batch.start, end: batch.end };
-  let current = range?.start;
+  let current = batch?.current ?? range?.start;
   const available = [...toolNames];
   let progress = null;
   let progressProject = null;
@@ -131,6 +133,7 @@ export function createWorkflow(toolNames, last_episode = null, batch = null, sco
     progress.ep.all_beats_have_content && !progress.active.has("script");
   return {
     allows(name, args) {
+      if (range && name === "weaveclaw_get_creation_progress") return current <= range.end && args?.episode === current;
       if (RECOMMENDATION_TOOLS.has(name)) {
         if (!recommendationReady() || !sameTarget(args)) return false;
         return name === "weaveclaw_get_config_recommendation_context" ||
@@ -171,7 +174,7 @@ export function createWorkflow(toolNames, last_episode = null, batch = null, sco
         progressProject = progress && typeof args?.project_id === "string" ? args.project_id : null;
         recommendationContext = null;
         recommendations = null;
-        if (range && progress && progress.active.size === 0 && completion(progress).step === STEPS.size) {
+        if (range && progress && progress.active.size === 0 && !["running", "failed", "cancelled"].includes(progress.source.ingest) && completion(progress).step === STEPS.size) {
           current++;
           if (current <= range.end) progress = null;
         }
@@ -188,7 +191,8 @@ export function createWorkflow(toolNames, last_episode = null, batch = null, sco
       }
     },
     plan() {
-      const batchState = range ? { batch: { ...range, current } } : {};
+      const batchState = range ? { batch: { ...range, current },
+        batch_episodes: Array.from({ length: range.end - range.start + 1 }, (_, index) => range.start + index) } : {};
       const allowed = new Set();
       let reason = null, next = null, checkpoint = false;
       if (progress) {

@@ -102,10 +102,12 @@ export function validToolResult(value) {
  * Each pending request receives its own abort signal, detached on settlement.
  */
 export function createTurn(input) {
-  if (!input || typeof input !== "object" || Object.keys(input).filter((key) => key !== "last_episode").sort().join(",") !== "history,host,limits,prompt,scope,tools") {
+  if (!input || typeof input !== "object" || Object.keys(input).filter((key) => key !== "last_episode" && key !== "batch").sort().join(",") !== "history,host,limits,prompt,scope,tools") {
     throw new TypeError("invalid_turn_start");
   }
-  const { tools, host, prompt, history, scope, limits, last_episode = null } = input;
+  const { tools, host, prompt, history, scope, limits, last_episode = null, batch = null } = input;
+  if (batch !== null && (scope !== "project" || !batch || typeof batch !== "object" || Array.isArray(batch) ||
+      Object.keys(batch).sort().join(",") !== "allow_write,current,end,start")) throw new TypeError("invalid_turn_start");
   if (last_episode !== null && (!Number.isSafeInteger(last_episode) || last_episode < 1 || last_episode > 10000)) {
     throw new TypeError("invalid_turn_start");
   }
@@ -142,7 +144,7 @@ export function createTurn(input) {
   const validators = new Map();
   let originals = new Map();
   let resultOrder = [], resultCursor = 0, resultBuffer = new Map();
-  const strategy = selectStrategy(tools, last_episode);
+  const strategy = selectStrategy(tools, batch?.current ?? last_episode);
   const priorMessages = history.map((item) => item.role === "user"
     ? { role: "user", content: [{ type: "text", text: item.content }], timestamp: Date.now() }
     : assistant([{ type: "text", text: item.content }], "stop"));
@@ -205,7 +207,7 @@ export function createTurn(input) {
       },
     };
   });
-  const workflow = createWorkflow([...names], last_episode, null, scope);
+  const workflow = createWorkflow([...names], batch ? null : last_episode, batch, scope);
   const streamFn = (_model, context, options) => {
     const stream = createAssistantMessageEventStream();
     const signal = options.signal;
