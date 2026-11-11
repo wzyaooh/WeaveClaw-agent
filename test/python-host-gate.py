@@ -70,7 +70,7 @@ class Model:
                              finish_reason='tool_call', model_name='mock')
 
 class Dispatcher:
-    def __init__(self, scenario, root): self.write_attempted = False; self.calls = []; self.scenario = scenario; self.root = root
+    def __init__(self, scenario, root): self.write_attempted = False; self.calls = []; self.scenario = scenario; self.root = root; self.project_id = 'fixture-project'
     def definitions(self):
         real_tools = [SimpleNamespace(name=spec.name, description=spec.description, parameters_json_schema=spec.schema)
                       for spec in TOOL_SPECS.values()]
@@ -243,11 +243,14 @@ async def main():
             expected = {'real_audio_accepted': 'video_required', 'real_audio_rejected': 'audio_unknown',
                         'real_audio_changed': 'audio_unknown'}.get(scenario, scenario.removeprefix('real_'))
             dispatcher, model = Dispatcher(scenario, Path(temp.name)), Model(expected)
-            bindings = []
+            bindings, events = [], []
             async def bind_strategy(digest):
                 bindings.append(digest)
+            async def on_event(event):
+                events.append(event)
             result = await asyncio.wait_for(OrchestratorRuntime(link=app.state.orchestrator_link, model=model,
                 dispatcher=dispatcher, stream=False).run('private prompt', scope='project', bind_strategy=bind_strategy,
+                    on_event=on_event,
                     history=[{'role': 'user', 'content': 'previous user message'}]), 10)
             expected_calls = [('weaveclaw_get_creation_progress', {'episode': 2})]
             if scenario == 'script_required':
@@ -255,6 +258,17 @@ async def main():
             assert len(bindings) == 1 and len(bindings[0]) == 64
             assert result.write_attempted == (scenario == 'script_required')
             assert model.calls == 2 and dispatcher.calls == expected_calls
+            if scenario.startswith('real_'):
+                [snapshot] = [event for event in events if event.get('type') == 'creation_progress']
+                assert snapshot['project_id'] == 'fixture-project' and snapshot['progress']['episode'] == 2
+                assert len(snapshot['progress']['skipped']) == snapshot['progress']['step']
+                if scenario == 'real_audio_accepted':
+                    assert snapshot['progress']['step'] == 11 and snapshot['progress']['skipped'][-1] == 'audio'
+                    assert snapshot['progress']['artifacts']['audio_unknown'] == 1
+                    assert snapshot['progress']['artifacts']['audio_confirmed'] == 1
+                if scenario == 'real_audio_stale':
+                    assert snapshot['progress']['step'] == 10 and snapshot['progress']['skipped'][-1] == 'first_frames'
+                    assert snapshot['progress']['artifacts']['audio_stale'] == 1
         for tool in ('weaveclaw_plan_scenes', 'weaveclaw_plan_props'):
             dispatcher = Dispatcher('real_global_optimize_required', Path(temp.name) / tool)
             model = Model('global_optimize_required', write_tool=tool)
