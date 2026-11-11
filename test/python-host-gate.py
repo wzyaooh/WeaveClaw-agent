@@ -43,6 +43,8 @@ class Model:
         assert f'reason={self.expected_reason}' in messages[0].parts[0].content
         if self.expected_reason == 'await_task':
             assert 'weaveclaw_generate_audio' not in {item.name for item in parameters.function_tools}
+        if self.expected_reason in ('audio_stale', 'audio_unknown'):
+            assert not {'weaveclaw_start_single_video', 'weaveclaw_compose_episode', 'weaveclaw_get_final_video'} & {item.name for item in parameters.function_tools}
         assert any(isinstance(part, ToolReturnPart) and part.content['data']['episode']['number'] == 2
                    for message in messages for part in message.parts)
         if self.expected_reason != 'script_required':
@@ -95,17 +97,40 @@ class Dispatcher:
         files = [paths.sketch(n) for n in (1, 2)]
         if stage not in ('global_optimize_required', 'first_frames_required'):
             files += [paths.frame(n) for n in (1, 2)]
-        if stage in ('video_required', 'compose_required', 'delivery'):
+        if stage == 'audio_unknown':
             files.append(paths.audio(1))
-        if stage in ('compose_required', 'delivery'):
-            files += [paths.video(n) for n in (1, 2)]
-        if stage == 'delivery': files.append(paths.final_video())
         for path in files:
             path.parent.mkdir(parents=True, exist_ok=True); path.write_bytes(b'fixture')
         if stage == 'await_task':
             with closing(sqlite3.connect(state / 'data.db')) as db:
                 db.execute('CREATE TABLE task_states(project_id TEXT, task_type TEXT, episode INTEGER, status TEXT, expires_at TEXT, updated_at TEXT)')
                 db.execute('INSERT INTO task_states VALUES(?,?,?,?,?,?)', ('fixture-project', 'audio_generation_indextts2', 2, 'running', None, '2026-11-11'))
+                db.commit()
+        if stage == 'audio_stale':
+            from novelvideo import creation_repository
+            from novelvideo.services import generated_audio as audio
+            from novelvideo.sqlite_store import SQLiteStore
+            store = SQLiteStore('fixture', output_dir=str(output), state_dir=str(state))
+            store._ensure_project_schema_sync()
+            database = state / 'data.db'
+            creation_repository.register(output, database)
+            voice = output / 'assets/voice.wav'; voice.parent.mkdir(parents=True); voice.write_bytes(b'voice')
+            ctx = SimpleNamespace(project_id='fixture-project', output_dir=output, state_dir=state)
+            stat = database.stat(); identity = [stat.st_dev, stat.st_ino]
+            with closing(sqlite3.connect(database)) as db:
+                db.row_factory = sqlite3.Row
+                db.execute("INSERT INTO episodes(number) VALUES(2)")
+                db.execute("INSERT INTO beats(episode_number,beat_number,narration,audio_type) VALUES(2,1,'old','narration')")
+                db.commit()
+                old = audio._snapshot(ctx, db, identity, 2, 1)
+                candidate = {'id': 'audio-fixture', 'path': 'assets/generated-audio/fixture/current.mp3', 'sha256': audio._hash(b'audio')}
+                source = {'voice_source': 'assets/voice.wav', 'voice_sha256': audio._hash(b'voice')}
+                target = output / candidate['path']; target.parent.mkdir(parents=True); target.write_bytes(b'audio')
+                db.execute('INSERT INTO generated_audio_items(id,operation_id,beat_num,snapshot_json,input_json,status,candidate_json) VALUES(?,?,?,?,?,?,?)',
+                           ('audio-fixture', 'batch', 1, json.dumps(old), json.dumps(source), 'adopted', json.dumps(candidate)))
+                audio._head(db, old, candidate, source, 'generated')
+                db.commit()
+                db.execute("UPDATE beats SET narration='new dialogue' WHERE episode_number=2 AND beat_number=1")
                 db.commit()
         episode = SimpleNamespace(identity_ids=['fixture'])
         class Store:
@@ -114,7 +139,11 @@ class Dispatcher:
             def get_episode(self, number): return episode if number == 2 else None
             async def get_beats_as_dicts(self, number): return beats
         ctx = SimpleNamespace(project_id='fixture-project', output_dir=output, state_dir=state)
-        return await creation_progress(ctx, Store(), 2)
+        result = await creation_progress(ctx, Store(), 2)
+        if stage == 'audio_stale':
+            creation_repository._databases.pop(str(output.resolve()), None)
+            assert result['episode']['audio_stale'] == 1
+        return result
 
 async def main():
     sock = socket.socket(); sock.bind(('127.0.0.1', 0)); sock.listen(100); sock.setblocking(False)
@@ -151,7 +180,7 @@ async def main():
         temp = tempfile.TemporaryDirectory()
         for scenario in ('script_required', 'config_recommendation', 'sketches_stale', 'quality_retry',
                          'real_global_optimize_required', 'real_first_frames_required', 'real_audio_required',
-                         'real_video_required', 'real_compose_required', 'real_delivery', 'real_await_task'):
+                         'real_audio_unknown', 'real_audio_stale', 'real_await_task'):
             expected = scenario.removeprefix('real_')
             dispatcher, model = Dispatcher(scenario, Path(temp.name)), Model(expected)
             bindings = []

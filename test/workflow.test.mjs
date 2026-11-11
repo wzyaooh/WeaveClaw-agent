@@ -11,8 +11,22 @@ const initial = () => ({ version: 1, source: { uploads: 0, imported: false }, pr
   episode: { number: 1, exists: false, identity_planned: false, beats: 0, all_beats_have_content: false,
     sketches_missing: 0, sketches_stale: 0, identity_detected: 0, first_frames_present: 0,
     video_prompt_present: 0, audio_present: 0, video_present: 0, composed: false }, active_steps: [] });
+// Existing workflow cases model explicitly current artifacts; separate cases below exercise stale and unknown facts.
+const freshFixture = (data) => {
+  const ep = { ...data.episode };
+  if (ep.audio_current === undefined && ep.audio_present !== undefined) {
+    Object.assign(ep, { audio_current: ep.audio_ready ?? ep.audio_present, audio_stale: 0, audio_unknown: 0 });
+  }
+  if (ep.video_current === undefined && ep.video_present !== undefined) {
+    Object.assign(ep, { video_current: ep.video_present, video_stale: 0, video_unknown: 0 });
+  }
+  if (ep.composed_freshness === undefined && ep.composed !== undefined) {
+    ep.composed_freshness = ep.composed ? "current" : "missing";
+  }
+  return { ...data, episode: ep };
+};
 const observe = (workflow, data) => workflow.observe("weaveclaw_get_creation_progress", { episode: 1 },
-  { ok: true, final: false, result: { ok: true, data } });
+  { ok: true, final: false, result: { ok: true, data: freshFixture(data) } });
 
 function qualityProgress() {
   const data = initial();
@@ -118,7 +132,7 @@ function batchProgress(workflow, number, completed = false) {
     video_prompt_present: 1, first_frames_present: 1, audio_present: 1,
     video_present: 1, composed: true,
   });
-  workflow.observe(names[0], { episode: number }, { ok: true, final: false, result: { ok: true, data } });
+  workflow.observe(names[0], { episode: number }, { ok: true, final: false, result: { ok: true, data: freshFixture(data) } });
   return data;
 }
 
@@ -171,7 +185,7 @@ test("批量规划不凭写回执、失败、执行中或前置缺失推进", ()
   const data = batchProgress(workflow, 1, true);
   // Use a new workflow to check that composed alone is insufficient.
   const pending = createWorkflow(names, null, { start: 1, end: 2 });
-  const refresh = () => pending.observe(names[0], { episode: 1 }, { ok: true, final: false, result: { ok: true, data } });
+  const refresh = () => pending.observe(names[0], { episode: 1 }, { ok: true, final: false, result: { ok: true, data: freshFixture(data) } });
   data.active_steps = ["compose"]; refresh();
   assert.equal(pending.plan().batch.current, 1);
   assert.equal(pending.plan().plan.reason, "await_task");
@@ -422,6 +436,10 @@ test("音频全部就绪后 allows 才允许目标集的视频和合成", () => 
   }
   data.episode.audio_present = 2;
   observe(workflow, data);
+  assert.equal(workflow.allows("weaveclaw_start_single_video", { episode: 1 }), true);
+  assert.equal(workflow.allows("weaveclaw_compose_episode", { episode: 1 }), false);
+  data.episode.video_present = 2;
+  observe(workflow, data);
   assert.equal(workflow.allows("weaveclaw_compose_episode", { episode: 1 }), true);
   data.episode.audio_present = 0;
   observe(workflow, data);
@@ -438,7 +456,7 @@ test("resumed episode only suggests reading progress and fresh target facts take
   assert.equal(workflow.allows("weaveclaw_generate_script", { episode: 7 }), false);
   const data = initial();
   data.episode.number = 8;
-  workflow.observe(names[0], { episode: 8 }, { ok: true, final: false, result: { ok: true, data } });
+  workflow.observe(names[0], { episode: 8 }, { ok: true, final: false, result: { ok: true, data: freshFixture(data) } });
   assert.equal(workflow.plan().plan.episode, 8);
   workflow.observe(names[0], { episode: 8 }, { ok: false, final: false, result: { ok: false } });
   assert.deepEqual(workflow.plan(), fallback);
@@ -469,7 +487,7 @@ test("重连读取目标集后从首个未完成步骤续接，不依赖本轮�
     assert.deepEqual(workflow.plan().plan, {
       episode: 7, next_tool: "weaveclaw_get_creation_progress", reason: "progress_required",
     });
-    workflow.observe(names[0], { episode: 7 }, { ok: true, final: false, result: { ok: true, data } });
+    workflow.observe(names[0], { episode: 7 }, { ok: true, final: false, result: { ok: true, data: freshFixture(data) } });
     const proposal = workflow.plan();
     assert.equal(proposal.plan.episode, 7);
     assert.equal(proposal.plan.next_tool, next_tool);
@@ -804,8 +822,28 @@ test("缺失下游事实不会推断完成或缺失", () => {
     const saved = data.episode[field];
     delete data.episode[field];
     observe(workflow, data);
-    assert.equal(workflow.plan().plan, null, field);
+    assert.ok(workflow.plan().plan === null || workflow.plan().plan.reason.endsWith("_unknown"), field);
     data.episode[field] = saved;
+  }
+});
+
+test("过期或未知素材不能解锁视频、合成或交付", () => {
+  const workflow = createWorkflow(names), data = qualityProgress();
+  Object.assign(data.episode, { audio_present: 2, video_present: 2, composed: true });
+  for (const [field, values, reason, blocked] of [
+    ["audio", { audio_current: 1, audio_stale: 1, audio_unknown: 0 }, "audio_stale", "weaveclaw_start_single_video"],
+    ["audio", { audio_current: 1, audio_stale: 0, audio_unknown: 1 }, "audio_unknown", "weaveclaw_compose_episode"],
+    ["video", { video_current: 1, video_stale: 1, video_unknown: 0 }, "video_stale", "weaveclaw_compose_episode"],
+    ["video", { video_current: 1, video_stale: 0, video_unknown: 1 }, "video_unknown", "weaveclaw_compose_episode"],
+    ["composition", { composed_freshness: "stale" }, "composition_stale", "weaveclaw_get_final_video"],
+    ["composition", { composed_freshness: "unknown" }, "composition_unknown", "weaveclaw_get_final_video"],
+  ]) {
+    const probe = freshFixture(data);
+    Object.assign(probe.episode, values);
+    workflow.observe(names[0], { episode: 1 }, { ok: true, final: false, result: { ok: true, data: probe } });
+    assert.deepEqual(workflow.plan().plan, { episode: 1, next_tool: null, reason, checkpoint: true }, field);
+    assert.equal(workflow.plan().tools.includes(blocked), false, field);
+    assert.equal(workflow.allows(blocked, { episode: 1 }), false, field);
   }
 });
 
