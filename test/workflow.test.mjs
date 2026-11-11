@@ -13,6 +13,23 @@ const initial = () => ({ version: 1, source: { uploads: 0, imported: false }, pr
 const observe = (workflow, data) => workflow.observe("weaveclaw_get_creation_progress", { episode: 1 },
   { ok: true, final: false, result: { ok: true, data } });
 
+test("三个 sketches 工具仅在目标集进度中存在角色时允许执行", () => {
+  const workflow = createWorkflow(names), data = initial();
+  const sketches = ["weaveclaw_assign_sketch_colors", "weaveclaw_generate_sketches", "weaveclaw_detect_sketch_identities"];
+  for (const name of sketches) assert.equal(workflow.allows(name, { episode: 1 }), false);
+  for (const characters of [0, 1, 2, 0]) {
+    data.project.characters = characters;
+    observe(workflow, data);
+    for (const name of sketches) {
+      assert.equal(workflow.allows(name, { episode: 1 }), characters > 0, `${name}: characters=${characters}`);
+      assert.equal(workflow.allows(name, {}), characters > 0);
+      assert.equal(workflow.allows(name, { episode: 2 }), false);
+    }
+    // 此次仅增加角色前置；不扩展为 plan() 的全部阶段门槛。
+    assert.equal(workflow.allows("weaveclaw_generate_script", { episode: 1 }), true);
+  }
+});
+
 test("跳过音频时 allows 拒绝合成和逐 beat 视频", () => {
   const workflow = createWorkflow(names), data = initial();
   for (const audio_present of [undefined, 0]) {

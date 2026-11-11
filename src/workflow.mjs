@@ -53,6 +53,7 @@ export function createWorkflow(toolNames, last_episode = null) {
     allows(name, args) {
       if (!STEPS.has(name)) return true;
       if (!progress || (Object.hasOwn(args, "episode") && args.episode !== progress.ep.number)) return false;
+      if (STEPS.get(name) === "sketches") return progress.project.characters > 0;
       if (name === "weaveclaw_compose_episode" || name === "weaveclaw_start_single_video") {
         return progress.ep.audio_present > 0;
       }
