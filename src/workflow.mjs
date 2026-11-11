@@ -58,14 +58,18 @@ function facts(result, episode) {
       (ep.video_prompt_present !== undefined && (!count(ep.video_prompt_present) || ep.video_prompt_present > ep.beats)) ||
       (ep.audio_present !== undefined && (!count(ep.audio_present) || ep.audio_present > ep.beats)) ||
       (ep.video_present !== undefined && (!count(ep.video_present) || ep.video_present > ep.beats)) ||
-      (ep.composed !== undefined && typeof ep.composed !== "boolean") ||
+       (ep.composed !== undefined && typeof ep.composed !== "boolean") ||
+       (ep.first_frames_quality !== undefined && typeof ep.first_frames_quality !== "boolean") ||
+       (ep.retry_count !== undefined && !count(ep.retry_count)) ||
       !Array.isArray(active) || active.some((item) => !ACTIVE.has(item)) || new Set(active).size !== active.length) return null;
   return {
     source: { uploads: source.uploads, imported: source.imported },
     project: { characters: project.characters, episodes: project.episodes, configured: project.configured === true },
     ep: { number: ep.number, exists: ep.exists, identity_planned: ep.identity_planned, beats: ep.beats,
       all_beats_have_content: ep.all_beats_have_content, sketches_missing: ep.sketches_missing,
-      sketches_stale: ep.sketches_stale, identity_detected: ep.identity_detected, first_frames_present: ep.first_frames_present,
+       sketches_stale: ep.sketches_stale, identity_detected: ep.identity_detected, first_frames_present: ep.first_frames_present,
+       first_frames_quality: ep.first_frames_quality !== false,
+       retry_count: ep.retry_count !== undefined ? ep.retry_count : 0,
       video_prompt_present: ep.video_prompt_present !== undefined ? ep.video_prompt_present : 0,
       audio_present: ep.audio_present !== undefined ? ep.audio_present : 0,
       video_present: ep.video_present !== undefined ? ep.video_present : 0,
@@ -147,7 +151,10 @@ export function createWorkflow(toolNames, last_episode = null, batch = null) {
         else if (!sketchesReady) [reason, next] = ["sketches_required", "weaveclaw_generate_sketches"];
         else if (ep.identity_detected !== ep.beats) [reason, next] = ["identity_detection_required", "weaveclaw_detect_sketch_identities"];
         else if (!videoPromptsReady) [reason, next] = ["global_optimize_required", "weaveclaw_optimize_video_global"];
-        else if (!framesReady) [reason, next] = ["first_frames_required", "weaveclaw_render_first_frames"];
+         else if (!framesReady) [reason, next] = ["first_frames_required", "weaveclaw_render_first_frames"];
+         // The host owns the retry counter; repeated planning cannot spend it.
+         else if (!ep.first_frames_quality && ep.retry_count === 0) [reason, next, checkpoint] = ["quality_retry", "weaveclaw_render_first_frames", true];
+         else if (!audioReady && !ep.first_frames_quality && ep.retry_count >= 1) [reason, next] = ["audio_required", "weaveclaw_generate_audio"];
         else if (!audioReady && ep.audio_present > 0) [reason, next] = ["audio_required", "weaveclaw_generate_audio"];
         else if (!audioReady) [reason, checkpoint] = ["review_first_frames", true];
         else if (!videoReady) [reason, next] = ["video_required", "weaveclaw_start_single_video"];

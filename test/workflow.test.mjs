@@ -13,6 +13,90 @@ const initial = () => ({ version: 1, source: { uploads: 0, imported: false }, pr
 const observe = (workflow, data) => workflow.observe("weaveclaw_get_creation_progress", { episode: 1 },
   { ok: true, final: false, result: { ok: true, data } });
 
+function qualityProgress() {
+  const data = initial();
+  data.source.imported = true;
+  Object.assign(data.project, { characters: 1, episodes: 1 });
+  Object.assign(data.episode, {
+    exists: true, identity_planned: true, beats: 2, all_beats_have_content: true,
+    identity_detected: 2, video_prompt_present: 2, first_frames_present: 2,
+  });
+  return data;
+}
+
+test("首帧质量不达标且未重试时建议重渲，重复规划不消耗宿主次数", () => {
+  const workflow = createWorkflow(names), data = qualityProgress();
+  Object.assign(data.episode, { first_frames_quality: false, retry_count: 0 });
+  observe(workflow, data);
+  const proposal = workflow.plan();
+  assert.deepEqual(proposal.plan, {
+    episode: 1, next_tool: "weaveclaw_render_first_frames", reason: "quality_retry", checkpoint: true,
+  });
+  assert.ok(proposal.tools.includes(proposal.plan.next_tool));
+  assert.deepEqual(workflow.plan(), proposal);
+  data.episode.retry_count = 1;
+  assert.deepEqual(workflow.plan(), proposal);
+  observe(workflow, data);
+  assert.equal(workflow.plan().plan.reason, "audio_required");
+});
+
+test("首帧重试耗尽后跳过审查继续音频和视频流水线", () => {
+  for (const retry_count of [1, 2]) {
+    const workflow = createWorkflow(names), data = qualityProgress();
+    Object.assign(data.episode, { first_frames_quality: false, retry_count });
+    for (const audio_present of [0, 1, 2]) {
+      data.episode.audio_present = audio_present;
+      observe(workflow, data);
+      assert.deepEqual(workflow.plan().plan, audio_present < 2
+        ? { episode: 1, next_tool: "weaveclaw_generate_audio", reason: "audio_required" }
+        : { episode: 1, next_tool: "weaveclaw_start_single_video", reason: "video_required" });
+    }
+  }
+});
+
+test("首帧质量达标或字段缺失时保持原有可选检查点", () => {
+  for (const fields of [{}, { first_frames_quality: true, retry_count: 0 }, { first_frames_quality: true, retry_count: 1 }]) {
+    const workflow = createWorkflow(names), data = qualityProgress();
+    Object.assign(data.episode, fields);
+    observe(workflow, data);
+    assert.deepEqual(workflow.plan().plan, {
+      episode: 1, next_tool: null, reason: "review_first_frames", checkpoint: true,
+    });
+    data.episode.audio_present = 1;
+    observe(workflow, data);
+    assert.equal(workflow.plan().plan.reason, "audio_required");
+  }
+});
+
+test("质量重试不覆盖执行中或缺失首帧的前置建议", () => {
+  const workflow = createWorkflow(names), data = qualityProgress();
+  data.episode.first_frames_quality = false;
+  observe(workflow, data);
+  assert.equal(workflow.plan().plan.reason, "quality_retry");
+  data.active_steps = ["first_frames"];
+  observe(workflow, data);
+  assert.equal(workflow.plan().plan.reason, "await_task");
+  data.active_steps = [];
+  data.episode.first_frames_present = 1;
+  observe(workflow, data);
+  assert.equal(workflow.plan().plan.reason, "first_frames_required");
+});
+
+test("首帧质量与重试次数非法值使事实失效", () => {
+  for (const [field, values] of [
+    ["first_frames_quality", [null, 0, "false", {}]],
+    ["retry_count", [null, -1, 0.5, "1", Number.MAX_SAFE_INTEGER + 1]],
+  ]) {
+    for (const value of values) {
+      const workflow = createWorkflow(names), data = qualityProgress();
+      data.episode[field] = value;
+      observe(workflow, data);
+      assert.equal(workflow.plan().plan, null);
+      assert.deepEqual(workflow.plan().tools, [names[0], "read_other"]);
+    }
+  }
+});
+
 function batchProgress(workflow, number, completed = false) {
   const data = initial();
   data.source.imported = true;
