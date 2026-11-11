@@ -279,6 +279,7 @@ test("只有一个流水线工具满足前置时仅暴露该写工具，读取�
 test("摄入完成且配置明确未设置时给出非阻断推荐", () => {
   const workflow = createWorkflow(names), data = initial();
   data.source.imported = true;
+  data.source.ingest = "completed";
   data.project.characters = 2;
   data.project.configured = false;
   observe(workflow, data);
@@ -297,6 +298,30 @@ test("摄入完成且配置明确未设置时给出非阻断推荐", () => {
   assert.equal(workflow.plan().plan.reason, "await_task");
 });
 
+test("推荐必须先读取同一项目的原文与版本，刷新或失败后不沿用", () => {
+  const context = "weaveclaw_get_config_recommendation_context", proposal = "weaveclaw_propose_config_recommendation";
+  const workflow = createWorkflow([...names, context, proposal, "weaveclaw_update_project"]), data = initial();
+  assert.ok(!workflow.plan().tools.includes(context));
+  data.source.imported = true;
+  data.source.ingest = "completed";
+  data.project.configured = false;
+  observe(workflow, data);
+  assert.equal(workflow.plan().plan.reason, "config_recommendation");
+  assert.ok(workflow.plan().tools.includes(context));
+  assert.ok(!workflow.plan().tools.includes(proposal));
+  const state = { source_sha256: "a".repeat(64), expected_revision: "b".repeat(32) };
+  workflow.observe(context, { episode: 1 }, { ok: true, final: false, result: { ok: true, data: state } });
+  assert.ok(workflow.allows(proposal, { episode: 1, ...state }));
+  assert.equal(workflow.allows(proposal, { episode: 1, ...state, expected_revision: "c".repeat(32) }), false);
+  assert.equal(workflow.allows("weaveclaw_update_project", { visual_style: "anime" }), false);
+  const values = { visual_style: "anime", narration_style: "third_person", ethnicity: "Chinese", rhythm: "medium" };
+  workflow.observe(proposal, { episode: 1 }, { ok: true, final: false, result: { ok: true, data: { ...state, recommendations: values } } });
+  assert.deepEqual(workflow.plan().recommendations, values);
+  observe(workflow, data);
+  assert.equal(workflow.plan().recommendations, undefined);
+  assert.ok(!workflow.plan().tools.includes(proposal));
+});
+
 test("缺少配置事实时不推断未配置", () => {
   const workflow = createWorkflow(names), data = initial();
   data.source.imported = true;
@@ -311,6 +336,7 @@ test("缺少配置事实时不推断未配置", () => {
 test("配置已设置时恢复正常流水线，配置改变仅在刷新后生效", () => {
   const workflow = createWorkflow(names), data = initial();
   data.source.imported = true;
+  data.source.ingest = "completed";
   data.project.characters = 1;
   data.project.configured = false;
   observe(workflow, data);
@@ -322,15 +348,22 @@ test("配置已设置时恢复正常流水线，配置改变仅在刷新后生�
   });
 });
 
-test("摄入或角色前置未满足时不提前推荐配置", () => {
+test("摄入未完成时不提前推荐配置", () => {
   const workflow = createWorkflow(names), data = initial();
   data.project.configured = false;
   data.source.uploads = 1;
   observe(workflow, data);
   assert.equal(workflow.plan().plan.reason, "ingest_required");
   data.source.imported = true;
+  for (const status of ["not_observed", "running", "failed", "cancelled"]) {
+    data.source.ingest = status;
+    observe(workflow, data);
+    assert.notEqual(workflow.plan().plan.reason, "config_recommendation");
+    assert.equal(workflow.plan().tools.includes("weaveclaw_get_config_recommendation_context"), false);
+  }
+  data.source.ingest = "completed";
   observe(workflow, data);
-  assert.equal(workflow.plan().plan.reason, "characters_required");
+  assert.equal(workflow.plan().plan.reason, "config_recommendation");
 });
 
 test("configured 非布尔值使进度失效而非误判已配置", () => {

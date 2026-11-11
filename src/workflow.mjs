@@ -18,6 +18,7 @@ const STEPS = new Map([
 const ACTIVE = new Set(STEPS.values());
 // Auxiliary planners are gated but do not add fictitious completion stages.
 const ASSET_PLANNERS = new Set(["weaveclaw_plan_scenes", "weaveclaw_plan_props"]);
+const RECOMMENDATION_TOOLS = new Set(["weaveclaw_get_config_recommendation_context", "weaveclaw_propose_config_recommendation"]);
 const count = (x) => Number.isSafeInteger(x) && x >= 0;
 // Distinct names for the progress checkpoints; several tools share a task stage.
 const CHECKPOINTS = ["ingest", "characters", "episodes", "identity_plan", "script", "sketch_colors",
@@ -63,6 +64,7 @@ function facts(result, episode) {
   });
   if (!data || data.version !== 1 || !source || !project || !ep || ep.number !== episode || !Number.isSafeInteger(episode) || episode < 1 || episode > 10000 ||
       !count(source.uploads) || typeof source.imported !== "boolean" ||
+      (source.ingest !== undefined && !["not_observed", "running", "completed", "failed", "cancelled"].includes(source.ingest)) ||
       !count(project.characters) || !count(project.episodes) ||
       (project.configured !== undefined && typeof project.configured !== "boolean") || typeof ep.exists !== "boolean" ||
       typeof ep.identity_planned !== "boolean" || !count(ep.beats) || typeof ep.all_beats_have_content !== "boolean" ||
@@ -85,7 +87,7 @@ function facts(result, episode) {
        (ep.retry_count !== undefined && !count(ep.retry_count)) ||
       !Array.isArray(active) || active.some((item) => !ACTIVE.has(item)) || new Set(active).size !== active.length) return null;
   return {
-    source: { uploads: source.uploads, imported: source.imported },
+    source: { uploads: source.uploads, imported: source.imported, ingest: source.ingest ?? null },
     project: { characters: project.characters, episodes: project.episodes, configured: project.configured ?? null },
     ep: { number: ep.number, exists: ep.exists, identity_planned: ep.identity_planned, beats: ep.beats,
       all_beats_have_content: ep.all_beats_have_content, sketches_missing: ep.sketches_missing,
@@ -115,10 +117,24 @@ export function createWorkflow(toolNames, last_episode = null, batch = null, sco
   const available = [...toolNames];
   let progress = null;
   let progressProject = null;
+  let recommendationContext = null, recommendations = null;
+  const sameTarget = (args) => progress && args?.episode === progress.ep.number &&
+    (scope === "project" ? progressProject === null || args.project_id == null || args.project_id === progressProject
+      : progressProject !== null && args.project_id === progressProject);
+  const recommendationReady = () => progress && progress.source.imported && progress.source.ingest === "completed" && progress.project.configured === false &&
+    !progress.active.has("ingest") && (scope === "project" || progressProject !== null);
   const beatsReady = () => progress !== null && progress.ep.exists && progress.ep.beats > 0 &&
     progress.ep.all_beats_have_content && !progress.active.has("script");
   return {
     allows(name, args) {
+      if (RECOMMENDATION_TOOLS.has(name)) {
+        if (!recommendationReady() || !sameTarget(args)) return false;
+        return name === "weaveclaw_get_config_recommendation_context" ||
+          (recommendationContext !== null && args.source_sha256 === recommendationContext.source_sha256 &&
+           args.expected_revision === recommendationContext.expected_revision);
+      }
+      if (name === "weaveclaw_update_project" && recommendationContext &&
+          ["visual_style", "narration_style", "ethnicity", "rhythm"].some((key) => Object.hasOwn(args ?? {}, key))) return false;
       if (ASSET_PLANNERS.has(name)) {
         if (!beatsReady() || args?.episode !== progress.ep.number) return false;
         const target = args?.project_id ?? null;
@@ -149,10 +165,22 @@ export function createWorkflow(toolNames, last_episode = null, batch = null, sco
         if (range && (current > range.end || args?.episode !== current)) return;
         progress = value?.ok === true && value.final === false ? facts(value.result, args?.episode) : null;
         progressProject = progress && typeof args?.project_id === "string" ? args.project_id : null;
+        recommendationContext = null;
+        recommendations = null;
         if (range && progress && progress.active.size === 0 && completion(progress).step === STEPS.size) {
           current++;
           if (current <= range.end) progress = null;
         }
+      } else if (name === "weaveclaw_get_config_recommendation_context") {
+        const data = value?.ok === true && value.final === false && value.result?.ok === true ? value.result.data : null;
+        recommendationContext = sameTarget(args) && data && /^[0-9a-f]{64}$/.test(data.source_sha256) &&
+          /^[0-9a-f]{32}$/.test(data.expected_revision) ? { source_sha256: data.source_sha256, expected_revision: data.expected_revision } : null;
+        recommendations = null;
+      } else if (name === "weaveclaw_propose_config_recommendation") {
+        const data = value?.ok === true && value.final === false && value.result?.ok === true ? value.result.data : null;
+        recommendations = sameTarget(args) && data && recommendationContext &&
+          data.source_sha256 === recommendationContext.source_sha256 && data.expected_revision === recommendationContext.expected_revision &&
+          data.recommendations && typeof data.recommendations === "object" ? { ...data.recommendations } : null;
       }
     },
     plan() {
@@ -164,6 +192,10 @@ export function createWorkflow(toolNames, last_episode = null, batch = null, sco
         const permit = (name, condition) => { if (condition && !active.has(STEPS.get(name))) allowed.add(name); };
         if (beatsReady() && (scope === "project" || progressProject !== null)) {
           for (const name of ASSET_PLANNERS) allowed.add(name);
+        }
+        if (recommendationReady()) {
+          allowed.add("weaveclaw_get_config_recommendation_context");
+          if (recommendationContext) allowed.add("weaveclaw_propose_config_recommendation");
         }
         permit("weaveclaw_start_ingest", source.uploads > 0);
         permit("weaveclaw_build_characters", source.imported);
@@ -191,9 +223,9 @@ export function createWorkflow(toolNames, last_episode = null, batch = null, sco
         else if (active.size) reason = "await_task";
         else if (!source.imported && !source.uploads) reason = "source_missing";
         else if (!source.imported) [reason, next] = ["ingest_required", "weaveclaw_start_ingest"];
-        else if (!project.characters) [reason, next] = ["characters_required", "weaveclaw_build_characters"];
         // Optional recommendation only; existing pipeline tools stay available.
-        else if (project.configured === false) [reason, checkpoint] = ["config_recommendation", true];
+        else if (recommendationReady() && !recommendations) [reason, checkpoint] = ["config_recommendation", true];
+        else if (!project.characters) [reason, next] = ["characters_required", "weaveclaw_build_characters"];
         else if (!project.episodes) [reason, next] = ["episodes_required", "weaveclaw_plan_episodes"];
         else if (!ep.exists) reason = null;
         else if (!ep.identity_planned) [reason, next] = ["identity_plan_required", "weaveclaw_plan_identities"];
@@ -222,7 +254,8 @@ export function createWorkflow(toolNames, last_episode = null, batch = null, sco
         else if (ep.composed_freshness === "stale") [reason, checkpoint] = ["composition_stale", true];
         else [reason, next] = ["delivery", "weaveclaw_get_final_video"];
       }
-      const tools = available.filter((name) => (!STEPS.has(name) && !ASSET_PLANNERS.has(name)) || allowed.has(name));
+      const tools = available.filter((name) => !(name === "weaveclaw_update_project" && recommendationContext) &&
+        ((!STEPS.has(name) && !ASSET_PLANNERS.has(name) && !RECOMMENDATION_TOOLS.has(name)) || allowed.has(name)));
       const feedback = completion(progress);
       // Only the verified completed prefix is skipped. It is recalculated on
       // every fresh observation and never infers completion from a write reply.
@@ -233,7 +266,7 @@ export function createWorkflow(toolNames, last_episode = null, batch = null, sco
         return { tools, plan: { episode: target, next_tool: "weaveclaw_get_creation_progress", reason: "progress_required" }, progress: feedback, skipped, ...batchState };
       }
       if (next && !tools.includes(next)) return { tools, plan: null, progress: feedback, skipped, ...batchState };
-      return { tools, plan: reason ? { episode: progress.ep.number, next_tool: next, reason, ...(checkpoint ? { checkpoint: true } : {}) } : null, progress: feedback, skipped, ...batchState };
+      return { tools, plan: reason ? { episode: progress.ep.number, next_tool: next, reason, ...(checkpoint ? { checkpoint: true } : {}) } : null, progress: feedback, skipped, ...(recommendations ? { recommendations } : {}), ...batchState };
     },
   };
 }

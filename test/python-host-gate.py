@@ -90,6 +90,7 @@ class Dispatcher:
                     'identity_detected': 0, 'first_frames_present': 0}, 'active_steps': []}
             if self.scenario == 'config_recommendation':
                 data['project']['configured'] = False
+                data['source']['ingest'] = 'completed'
             elif self.scenario == 'sketches_stale':
                 data['episode'].update(beats=1, all_beats_have_content=True, sketches_stale=1)
             elif self.scenario == 'quality_retry':
@@ -114,6 +115,15 @@ class Dispatcher:
         output.mkdir(parents=True, exist_ok=True); state.mkdir(parents=True, exist_ok=True)
         (output / 'novel.txt').write_text('fixture', encoding='utf-8')
         stage = 'audio_accepted' if self.scenario == 'real_resume' else self.scenario.removeprefix('real_')
+        if stage != 'config_recommendation':
+            (state / 'project_config.json').write_text(json.dumps({'visual_style': 'anime', 'narration_style': 'third_person',
+                'ethnicity': 'Chinese', 'rhythm': 'medium'}), encoding='utf-8')
+        else:
+            with closing(sqlite3.connect(state / 'data.db')) as db:
+                db.execute('CREATE TABLE IF NOT EXISTS task_states(project_id TEXT, task_type TEXT, episode INTEGER, status TEXT, expires_at TEXT, updated_at TEXT)')
+                if not db.execute('SELECT 1 FROM task_states').fetchone():
+                    db.execute('INSERT INTO task_states VALUES(?,?,?,?,?,?)', ('fixture-project', 'ingest_fast', 0, 'completed', None, '2026-11-12'))
+                db.commit()
         beats = [{'beat_number': n, 'narration_segment': 'fixture', 'detected_identities': [NO_CHARACTER_MARKER],
                   'audio_type': 'silence' if n == 2 else 'narration',
                   'video_mode': 'i2v' if stage != 'global_optimize_required' else '',
@@ -187,7 +197,8 @@ class Dispatcher:
                         return episode if db.execute('SELECT 1 FROM episodes WHERE number=?', (number,)).fetchone() else None
                 return episode
             async def get_beats_as_dicts(self, number): return beats
-        ctx = SimpleNamespace(project_id='fixture-project', output_dir=output, state_dir=state)
+        ctx = SimpleNamespace(project_id='fixture-project', output_dir=output, state_dir=state,
+                              owner_username='fixture', project_name='fixture')
         store = Store()
         result = await creation_progress(ctx, store, 2)
         if self.scenario == 'real_resume':
@@ -278,6 +289,51 @@ async def main():
             assert result.write_attempted and model.calls == 2
             assert dispatcher.calls == [('weaveclaw_get_creation_progress', {'episode': 2}), (tool, {'episode': 2})]
         from novelvideo.chat.business_tools import BusinessToolDispatcher, BusinessToolError
+        fixture = Dispatcher('real_config_recommendation', Path(temp.name) / 'config-recommendation')
+        events, requests, claim = [], [], AsyncMock(return_value=True)
+        async def config_request(method, path, *, query=None, body=None):
+            requests.append((method, path))
+            assert method == 'GET'
+            if path.endswith('/creation/progress'):
+                return {'ok': True, 'data': await fixture.real_progress()}
+            from novelvideo.services.creation_config_recommendations import context
+            ctx = SimpleNamespace(project_id='fixture-project', output_dir=fixture.root / fixture.scenario / 'output',
+                state_dir=fixture.root / fixture.scenario / 'state', owner_username='fixture', project_name='fixture')
+            return {'ok': True, 'data': context(ctx)}
+        class RecommendationModel(Model):
+            async def request(self, messages, settings, parameters):
+                self.calls += 1
+                names = {item.name for item in parameters.function_tools}
+                if self.calls == 1:
+                    assert 'weaveclaw_get_config_recommendation_context' not in names
+                    return ModelResponse(parts=[ToolCallPart('weaveclaw_get_creation_progress', {'episode': 2}, 'read')], finish_reason='tool_call', model_name='mock')
+                if self.calls == 2:
+                    assert 'reason=config_recommendation' in messages[0].parts[0].content
+                    assert 'weaveclaw_get_config_recommendation_context' in names and 'weaveclaw_propose_config_recommendation' not in names
+                    return ModelResponse(parts=[ToolCallPart('weaveclaw_get_config_recommendation_context', {'episode': 2}, 'context')], finish_reason='tool_call', model_name='mock')
+                if self.calls == 3:
+                    item = next(part.content['data'] for message in messages for part in message.parts
+                        if isinstance(part, ToolReturnPart) and isinstance(part.content, dict) and 'source_excerpt' in part.content.get('data', {}))
+                    assert item['source_excerpt'] == 'fixture' and 'weaveclaw_propose_config_recommendation' in names
+                    args = {'episode': 2, 'source_sha256': item['source_sha256'], 'expected_revision': item['expected_revision'],
+                        'visual_style': 'anime', 'narration_style': 'third_person', 'ethnicity': 'Chinese', 'rhythm': 'medium', 'reason': '根据片段建议'}
+                    return ModelResponse(parts=[ToolCallPart('weaveclaw_propose_config_recommendation', args, 'proposal')], finish_reason='tool_call', model_name='mock')
+                assert self.calls == 4
+                return ModelResponse(parts=[TextPart('请查看并选择建议')], finish_reason='stop', model_name='mock')
+        async def config_event(event):
+            events.append(event)
+        dispatcher = BusinessToolDispatcher(project_id='fixture-project', request=config_request, authorize=AsyncMock(), claim_write=claim)
+        model = RecommendationModel('config_recommendation')
+        from novelvideo.services.style_service import StyleService
+        with patch.object(StyleService, 'get_style_labels', return_value={'anime': '动画'}):
+            result = await asyncio.wait_for(OrchestratorRuntime(link=app.state.orchestrator_link, model=model,
+                dispatcher=dispatcher, stream=False).run('给出配置建议', scope='project', bind_strategy=bind_strategy,
+                    on_event=config_event, history=[{'role': 'user', 'content': 'previous user message'}]), 10)
+        [proposed] = [event for event in events if event.get('type') == 'tool_result' and event.get('name') == 'weaveclaw_propose_config_recommendation']
+        assert proposed['fresh'] and proposed['result']['data']['recommendations']['visual_style'] == 'anime'
+        assert 'source_excerpt' not in proposed['result']['data'] and not result.write_attempted
+        claim.assert_not_awaited()
+        assert all(method == 'GET' for method, _ in requests)
         for changed in (False, True):
             fixture = Dispatcher('real_resume', Path(temp.name) / f'audio-recheck-{changed}')
             requests, claim = [], AsyncMock(return_value=True)
