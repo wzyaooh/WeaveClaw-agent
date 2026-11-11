@@ -88,7 +88,9 @@ export async function connectHost({ url, token }) {
     }
     const attempt = { pending: new Map(), cancelled: new Map(), turn: undefined };
     const host = { request(kind, payload, signal) {
-      if (closed || signal?.aborted || turns.get(frame.turn_id) !== attempt || attempt.pending.size) {
+      if (closed || signal?.aborted || turns.get(frame.turn_id) !== attempt ||
+          (attempt.pending.size && (kind !== "tool.call" || attempt.pending.size >= 6 ||
+            [...attempt.pending.values()].some((item) => item.kind !== "tool.call")))) {
         return Promise.reject(new Error("turn_finished"));
       }
       const id = newId();
@@ -109,7 +111,7 @@ export async function connectHost({ url, token }) {
     } };
     attempt.turn = createTurn({ tools: frame.payload.tools, prompt: frame.payload.prompt, history: frame.payload.history, scope: frame.payload.scope, limits: frame.payload.limits, last_episode: frame.payload.last_episode, host });
     turns.set(frame.turn_id, attempt);
-    send("turn.accept", frame.turn_id, frame.request_id, { strategy: attempt.turn.strategy });
+    send("turn.accept", frame.turn_id, frame.request_id, { strategy: attempt.turn.strategy, capabilities: { parallel_reads: true } });
     void attempt.turn.run().then((result) => finish(frame.turn_id, result.error && !result.aborted ? "turn.error" : "turn.end"),
       () => finish(frame.turn_id, "turn.error"));
   };

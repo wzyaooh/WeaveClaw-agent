@@ -334,6 +334,60 @@ async def main():
         assert 'source_excerpt' not in proposed['result']['data'] and not result.write_attempted
         claim.assert_not_awaited()
         assert all(method == 'GET' for method, _ in requests)
+        # Real dispatcher, authenticated local transport and simulated model:
+        # neither read can finish until both have entered the request handler.
+        entered, both, saved = [], asyncio.Event(), []
+        async def parallel_request(method, path, *, query=None, body=None):
+            assert method == 'GET'
+            entered.append(path)
+            if len(entered) == 2:
+                both.set()
+            await asyncio.wait_for(both.wait(), 3)
+            if path.endswith('/characters'):
+                await asyncio.sleep(0.02)
+            return {'ok': True, 'data': [{'path': path}]}
+        async def save_parallel(_model_id, tool_id, name, args, value, cost):
+            saved.append((tool_id, name, cost))
+        class ParallelModel(Model):
+            async def request(self, messages, settings, parameters):
+                self.calls += 1
+                if self.calls == 1:
+                    names = {item.name for item in parameters.function_tools}
+                    assert {'weaveclaw_list_characters', 'weaveclaw_list_episodes'} <= names
+                    return ModelResponse(parts=[ToolCallPart('weaveclaw_list_characters', {}, 'characters'),
+                        ToolCallPart('weaveclaw_list_episodes', {}, 'episodes')], finish_reason='tool_call', model_name='mock')
+                returns = [part.tool_call_id for message in messages for part in message.parts if isinstance(part, ToolReturnPart)]
+                assert returns == ['characters', 'episodes']
+                return ModelResponse(parts=[TextPart('已读取角色和分集')], finish_reason='stop', model_name='mock')
+        claim = AsyncMock(return_value=True)
+        dispatcher = BusinessToolDispatcher(project_id='fixture-project', request=parallel_request,
+            authorize=AsyncMock(), claim_write=claim)
+        model = ParallelModel('parallel')
+        result = await asyncio.wait_for(OrchestratorRuntime(link=app.state.orchestrator_link, model=model,
+            dispatcher=dispatcher, stream=False, save_read=save_parallel).run('查看角色和分集', scope='project',
+                bind_strategy=bind_strategy, history=[{'role': 'user', 'content': 'previous user message'}]), 10)
+        assert len(entered) == 2 and dispatcher.read_count == 2 and not result.write_attempted
+        assert saved == [('characters', 'weaveclaw_list_characters', 1), ('episodes', 'weaveclaw_list_episodes', 1)]
+        claim.assert_not_awaited()
+        # One encrypted read is replayed and the other is freshly fetched;
+        # each still consumes exactly one read and no replay causes a GET.
+        fresh_requests, replay_saved = [], []
+        async def fresh_request(method, path, *, query=None, body=None):
+            fresh_requests.append(path)
+            return {'ok': True, 'data': [{'path': path}]}
+        async def replay_parallel(_model_id, tool_id, name, args):
+            return {'read_cost': 1, 'result': {'ok': True, 'data': []}} if tool_id == 'characters' else None
+        async def save_fresh(_model_id, tool_id, name, args, value, cost):
+            replay_saved.append((tool_id, cost))
+        claim = AsyncMock(return_value=True)
+        dispatcher = BusinessToolDispatcher(project_id='fixture-project', request=fresh_request,
+            authorize=AsyncMock(), claim_write=claim)
+        result = await asyncio.wait_for(OrchestratorRuntime(link=app.state.orchestrator_link, model=ParallelModel('parallel'),
+            dispatcher=dispatcher, stream=False, replay_read=replay_parallel, save_read=save_fresh).run('查看角色和分集',
+                scope='project', bind_strategy=bind_strategy, history=[{'role': 'user', 'content': 'previous user message'}]), 10)
+        assert len(fresh_requests) == 1 and fresh_requests[0].endswith('/episodes')
+        assert dispatcher.read_count == 2 and replay_saved == [('episodes', 1)] and not result.write_attempted
+        claim.assert_not_awaited()
         for changed in (False, True):
             fixture = Dispatcher('real_resume', Path(temp.name) / f'audio-recheck-{changed}')
             requests, claim = [], AsyncMock(return_value=True)

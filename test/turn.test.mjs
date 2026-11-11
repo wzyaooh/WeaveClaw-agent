@@ -145,6 +145,66 @@ test("Pi projects every acknowledged tool in a complete batch", async () => {
     { ref: "tool", response: 1, id: "tool-1" }, { ref: "tool", response: 1, id: "tool-2" }], tools: ["read_project"], plan: null });
 });
 
+test("independent reads overlap and retain model order when results arrive out of order", async () => {
+  const first = { ...tool, name: "weaveclaw_list_characters" };
+  const second = { ...tool, name: "weaveclaw_list_episodes" };
+  const calls = [], resolvers = new Map();
+  let models = 0;
+  const host = { request(kind, payload) {
+    if (kind === "model.call") {
+      models++;
+      if (models === 1) return Promise.resolve({ parts: [call(first.name), { ...call(second.name), id: "tool-2" }] });
+      assert.deepEqual(payload.context.slice(-2), [{ ref: "tool", response: 1, id: "tool-1" }, { ref: "tool", response: 1, id: "tool-2" }]);
+      return Promise.resolve({ parts: [] });
+    }
+    calls.push(payload.name);
+    return new Promise((resolve) => {
+      resolvers.set(payload.name, resolve);
+      if (resolvers.size === 2) {
+        resolvers.get(second.name)({ final: false, ok: true, result: { ok: true, data: 2 } });
+        setTimeout(() => resolvers.get(first.name)({ final: false, ok: true, result: { ok: true, data: 1 } }), 5);
+      }
+    });
+  } };
+  const output = await createTurn({ scope: "project", prompt: "查看角色和分集", history: [], tools: [first, second], host }).run();
+  assert.equal(output.error, undefined);
+  assert.deepEqual(calls, [first.name, second.name]);
+  assert.equal(models, 2);
+});
+
+test("a write mixed with an independent read remains sequential and stops after the write", async () => {
+  const read = { ...tool, name: "weaveclaw_list_characters" };
+  const host = mockHost([model(call(write.name), { ...call(read.name), id: "read" }), result(true)]);
+  assert.equal((await createTurn({ scope: "project", prompt: "执行", history: [], tools: [write, read], host }).run()).error, undefined);
+  assert.deepEqual(host.requests.map((item) => item.kind), ["model.call", "tool.call"]);
+});
+
+test("a failed parallel read aborts the other request and never starts another model", async () => {
+  const first = { ...tool, name: "weaveclaw_list_characters" };
+  const second = { ...tool, name: "weaveclaw_list_episodes" };
+  let calls = 0, modelCalls = 0, cancelled = false, rejectFirst;
+  const host = { request(kind, payload, signal) {
+    if (kind === "model.call") {
+      modelCalls++;
+      return Promise.resolve({ parts: [call(first.name), { ...call(second.name), id: "tool-2" }] });
+    }
+    calls++;
+    return new Promise((_resolve, reject) => {
+      if (payload.name === first.name) rejectFirst = reject;
+      else {
+        signal.addEventListener("abort", () => { cancelled = true; reject(new Error("aborted")); }, { once: true });
+        rejectFirst(new Error("lost"));
+      }
+    });
+  } };
+  const result = await createTurn({ scope: "project", prompt: "查看", history: [], tools: [first, second], host }).run();
+  assert.equal(result.error, "host_tool_failed");
+  assert.equal(result.aborted, false);
+  assert.equal(calls, 2);
+  assert.equal(modelCalls, 1);
+  assert.equal(cancelled, true);
+});
+
 test("a failed model or tool request stops without another host call", async () => {
   for (const replies of [[new Error("lost")], [model(call()), new Error("lost")]]) {
     const host = mockHost(replies);

@@ -6,7 +6,7 @@ import { isDeepStrictEqual } from "node:util";
 import { createAssistantMessageEventStream, validateToolArguments } from "@earendil-works/pi-ai";
 import { createProjection } from "./context.mjs";
 import { selectStrategy } from "./strategy.mjs";
-import { createWorkflow } from "./workflow.mjs";
+import { createWorkflow, PARALLEL_READS } from "./workflow.mjs";
 
 const MAX_PROMPT_CHARS = 24_000;
 const MAX_HISTORY_MESSAGES = 40;
@@ -141,6 +141,7 @@ export function createTurn(input) {
   const names = new Set();
   const validators = new Map();
   let originals = new Map();
+  let resultOrder = [], resultCursor = 0, resultBuffer = new Map();
   const strategy = selectStrategy(tools, last_episode);
   const priorMessages = history.map((item) => item.role === "user"
     ? { role: "user", content: [{ type: "text", text: item.content }], timestamp: Date.now() }
@@ -171,6 +172,7 @@ export function createTurn(input) {
     names.add(tool.name);
     return {
       name: tool.name, label: tool.name, description: tool.description, parameters: tool.parameters,
+      executionMode: PARALLEL_READS.has(tool.name) ? "parallel" : "sequential",
       execute: async (id, args, signal) => {
         if (finished || signal?.aborted) throw new Error("turn_finished");
         try {
@@ -181,8 +183,13 @@ export function createTurn(input) {
           deliveredCalls += 1;
           const value = await request("tool.call", { tool_call_id: id, name: tool.name, arguments: original.arguments }, signal);
           if (!validToolResult(value)) throw new Error("invalid_tool_result");
-          projection.recordToolResult(id, tool.name, value);
-          workflow.observe(tool.name, original.arguments, value);
+          resultBuffer.set(id, { name: tool.name, args: original.arguments, value });
+          while (resultCursor < resultOrder.length && resultBuffer.has(resultOrder[resultCursor])) {
+            const resultId = resultOrder[resultCursor++], item = resultBuffer.get(resultId);
+            resultBuffer.delete(resultId);
+            projection.recordToolResult(resultId, item.name, item.value);
+            workflow.observe(item.name, item.args, item.value);
+          }
           if (value.final) {
             finished = true;
             agent.abort();
@@ -191,7 +198,8 @@ export function createTurn(input) {
             isError: !value.ok, terminate: value.final };
         } catch (error) {
           finished = true;
-          failure = signal?.aborted ? "aborted" : "host_tool_failed";
+          failure ??= signal?.aborted ? "aborted" : "host_tool_failed";
+          agent.abort();
           throw error;
         }
       },
@@ -223,6 +231,8 @@ export function createTurn(input) {
           batch.set(part.id, { name: part.name, arguments: structuredClone(part.arguments) });
         }
         originals = batch;
+        if (batch.size > 6 && [...batch.values()].every((item) => PARALLEL_READS.has(item.name))) throw new Error("parallel_batch_too_large");
+        resultOrder = [...batch.keys()]; resultCursor = 0; resultBuffer = new Map();
         expectedCalls = content.filter((part) => part.type === "toolCall").length;
         deliveredCalls = 0;
         const message = assistant(content, content.some((part) => part.type === "toolCall") ? "toolUse" : "stop");
@@ -238,7 +248,7 @@ export function createTurn(input) {
   };
   const agent = new Agent({ initialState: { model: MODEL, systemPrompt: "Follow the host's creative workflow.",
     messages: priorMessages, tools: mappedTools },
-    streamFn, toolExecution: "sequential", finishTurn: async (_turn, signal) => {
+    streamFn, toolExecution: "parallel", finishTurn: async (_turn, signal) => {
       if (!finished && deliveredCalls !== expectedCalls) {
         finished = true;
         failure = signal?.aborted ? "aborted" : "host_tool_failed";

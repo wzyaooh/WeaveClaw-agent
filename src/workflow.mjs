@@ -19,6 +19,10 @@ const ACTIVE = new Set(STEPS.values());
 // Auxiliary planners are gated but do not add fictitious completion stages.
 const ASSET_PLANNERS = new Set(["weaveclaw_plan_scenes", "weaveclaw_plan_props"]);
 const RECOMMENDATION_TOOLS = new Set(["weaveclaw_get_config_recommendation_context", "weaveclaw_propose_config_recommendation"]);
+// Each is an independent, single-request, read-only project query. The host
+// maintains its own identical allowlist and remains the authority.
+export const PARALLEL_READS = new Set(["weaveclaw_get_project", "weaveclaw_list_characters", "weaveclaw_list_episodes",
+  "weaveclaw_list_scenes", "weaveclaw_list_props", "weaveclaw_get_episode_script", "weaveclaw_pipeline_status"]);
 const count = (x) => Number.isSafeInteger(x) && x >= 0;
 // Distinct names for the progress checkpoints; several tools share a task stage.
 const CHECKPOINTS = ["ingest", "characters", "episodes", "identity_plan", "script", "sketch_colors",
@@ -256,6 +260,7 @@ export function createWorkflow(toolNames, last_episode = null, batch = null, sco
       }
       const tools = available.filter((name) => !(name === "weaveclaw_update_project" && recommendationContext) &&
         ((!STEPS.has(name) && !ASSET_PLANNERS.has(name) && !RECOMMENDATION_TOOLS.has(name)) || allowed.has(name)));
+      const parallel_tools = tools.filter((name) => PARALLEL_READS.has(name));
       const feedback = completion(progress);
       // Only the verified completed prefix is skipped. It is recalculated on
       // every fresh observation and never infers completion from a write reply.
@@ -263,10 +268,10 @@ export function createWorkflow(toolNames, last_episode = null, batch = null, sco
       const target = range ? current : last_episode;
       if (!progress && target !== null && tools.includes("weaveclaw_get_creation_progress")) {
         // last_episode identifies the target only. Read its facts before writes.
-        return { tools, plan: { episode: target, next_tool: "weaveclaw_get_creation_progress", reason: "progress_required" }, progress: feedback, skipped, ...batchState };
+        return { tools, plan: { episode: target, next_tool: "weaveclaw_get_creation_progress", reason: "progress_required" }, progress: feedback, skipped, parallel_tools, ...batchState };
       }
-      if (next && !tools.includes(next)) return { tools, plan: null, progress: feedback, skipped, ...batchState };
-      return { tools, plan: reason ? { episode: progress.ep.number, next_tool: next, reason, ...(checkpoint ? { checkpoint: true } : {}) } : null, progress: feedback, skipped, ...(recommendations ? { recommendations } : {}), ...batchState };
+      if (next && !tools.includes(next)) return { tools, plan: null, progress: feedback, skipped, parallel_tools, ...batchState };
+      return { tools, plan: reason ? { episode: progress.ep.number, next_tool: next, reason, ...(checkpoint ? { checkpoint: true } : {}) } : null, progress: feedback, skipped, parallel_tools, ...(recommendations ? { recommendations } : {}), ...batchState };
     },
   };
 }
