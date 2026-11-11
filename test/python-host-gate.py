@@ -164,8 +164,13 @@ class Dispatcher:
         fixture = self
         class Store:
             def get_all_characters(self): return [object()]
-            def get_all_episodes(self): return [episode]
-            def get_episode(self, number): return episode if number == 2 and not getattr(fixture, 'resume_deleted', False) else None
+            def get_all_episodes(self): return [episode] if self.get_episode(2) else []
+            def get_episode(self, number):
+                if number != 2: return None
+                if fixture.scenario == 'real_resume':
+                    with closing(sqlite3.connect(state / 'data.db')) as db:
+                        return episode if db.execute('SELECT 1 FROM episodes WHERE number=?', (number,)).fetchone() else None
+                return episode
             async def get_beats_as_dicts(self, number): return beats
         ctx = SimpleNamespace(project_id='fixture-project', output_dir=output, state_dir=state)
         store = Store()
@@ -247,7 +252,9 @@ async def main():
             if index == 1:
                 PathResolver(str(dispatcher.resume_context[0].output_dir), 2).audio(1).write_bytes(b'replaced after interruption')
             if index == 2:
-                dispatcher.resume_deleted = True
+                with closing(sqlite3.connect(dispatcher.resume_context[0].state_dir / 'data.db')) as db:
+                    db.execute('DELETE FROM episodes WHERE number=2')
+                    db.commit()
             last_episode = messages.last_creation_episode('user', scope, 'principal')
             model = Model(expected, resumed=index > 0)
             result = await asyncio.wait_for(OrchestratorRuntime(link=app.state.orchestrator_link, model=model,
