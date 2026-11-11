@@ -105,3 +105,5 @@
 | 逐 beat 视频 | `first_frames_present === beats && audio_present === beats` |
 | 合成 | 首帧 + 音频 + 视频全部就绪（`video_present === beats`） |
 | 成片展示 | `ep.composed === true` |
+
+> P3-C（智能重试）：需宿主协议扩展错误分类字段（schema_error/timeout/rate_limit），暂未实现。
