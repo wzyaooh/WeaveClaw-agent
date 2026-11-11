@@ -46,6 +46,20 @@ function qualityProgress() {
   return data;
 }
 
+test("自动批次必须先验证当前首帧，不能靠现有成片跳过", () => {
+  const workflow = createWorkflow([...names, "weaveclaw_verify_first_frames"], null,
+    {start: 1, end: 1, current: 1, allow_write: true, quality_required: true});
+  const data = qualityProgress();
+  Object.assign(data.episode, {audio_present: 2, video_present: 2, composed: true});
+  observe(workflow, data);
+  assert.equal(workflow.plan().plan.reason, "quality_verify_required");
+  assert.equal(workflow.plan().plan.next_tool, "weaveclaw_verify_first_frames");
+  assert.equal(workflow.plan().batch.current, 1);
+  data.episode.first_frames_quality = true;
+  observe(workflow, data);
+  assert.equal(workflow.plan().batch.current, 2);
+});
+
 test("动态跳过已完成的连续步骤，并在进度失效时清空", () => {
   const workflow = createWorkflow(names), data = initial();
   data.source.imported = true;

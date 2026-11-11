@@ -325,6 +325,37 @@ async def main():
                           composed=True, composed_freshness='current', composition_confirmed=False)
             return {'version': 1, 'source': {'uploads': 1, 'imported': True, 'ingest': 'completed'},
                     'project': {'characters': 1, 'episodes': 2, 'configured': True}, 'episode': ep, 'active_steps': []}
+        class VerifyBatchModel(Model):
+            async def request(self, messages, settings, parameters):
+                self.calls += 1
+                if self.calls == 1:
+                    return ModelResponse(parts=[ToolCallPart('weaveclaw_get_creation_progress', {'episode': 1}, 'quality-read')], finish_reason='tool_call', model_name='mock')
+                assert 'reason=quality_verify_required' in messages[0].parts[0].content
+                return ModelResponse(parts=[ToolCallPart('weaveclaw_verify_first_frames', {'episode': 1}, 'quality-submit')], finish_reason='tool_call', model_name='mock')
+        quality_batch = {'start': 1, 'end': 2, 'current': 1, 'allow_write': True, 'quality_required': True}
+        quality_requests, quality_reads = [], []
+        async def quality_request(method, path, *, query=None, body=None):
+            quality_requests.append((method, path, body))
+            if method == 'GET': return {'ok': True, 'data': batch_progress(1, True)}
+            assert body == {'operation': 'frame', 'verify_type': 'frame'}
+            return {'ok': True, 'data': {'task_id': 'quality-task', 'task_type': 'verification', 'scope': 'run1', 'status': 'queued'}}
+        async def save_quality(call_id, tool_id, name, args, result, cost):
+            quality_reads.append({'read_cost': cost, 'result': result})
+        claim = AsyncMock(return_value=True)
+        dispatcher = BusinessToolDispatcher(project_id='fixture-project', request=quality_request, authorize=AsyncMock(), claim_write=claim)
+        quality_result = await asyncio.wait_for(OrchestratorRuntime(link=app.state.orchestrator_link, model=VerifyBatchModel('quality'),
+            dispatcher=dispatcher, stream=False, save_read=save_quality).run('继续批量', scope='project', batch=quality_batch,
+                bind_strategy=bind_strategy, history=[{'role': 'user', 'content': 'previous user message'}]), 10)
+        assert quality_result.write_attempted and [x[0] for x in quality_requests] == ['GET', 'GET', 'POST']
+        claim.assert_awaited_once()
+        no_request, no_claim = AsyncMock(), AsyncMock()
+        dispatcher = BusinessToolDispatcher(project_id='fixture-project', request=no_request, authorize=AsyncMock(), claim_write=no_claim,
+            replay_write=AsyncMock(return_value={'ok': True, 'data': {'task_id': 'quality-task', 'task_type': 'verification', 'scope': 'run1', 'status': 'queued'}}))
+        async def replay_quality_batch(*args): return quality_reads[0]
+        await asyncio.wait_for(OrchestratorRuntime(link=app.state.orchestrator_link, model=VerifyBatchModel('quality'),
+            dispatcher=dispatcher, stream=False, replay_read=replay_quality_batch).run('继续批量', scope='project', batch=quality_batch,
+                bind_strategy=bind_strategy, history=[{'role': 'user', 'content': 'previous user message'}]), 10)
+        no_request.assert_not_awaited(); no_claim.assert_not_awaited()
         class BatchModel(Model):
             async def request(self, messages, settings, parameters):
                 self.calls += 1

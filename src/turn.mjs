@@ -107,7 +107,7 @@ export function createTurn(input) {
   }
   const { tools, host, prompt, history, scope, limits, last_episode = null, batch = null } = input;
   if (batch !== null && (scope !== "project" || !batch || typeof batch !== "object" || Array.isArray(batch) ||
-      Object.keys(batch).sort().join(",") !== "allow_write,current,end,start")) throw new TypeError("invalid_turn_start");
+      !["allow_write,current,end,start", "allow_write,current,end,quality_required,start"].includes(Object.keys(batch).sort().join(",")))) throw new TypeError("invalid_turn_start");
   if (last_episode !== null && (!Number.isSafeInteger(last_episode) || last_episode < 1 || last_episode > 10000)) {
     throw new TypeError("invalid_turn_start");
   }

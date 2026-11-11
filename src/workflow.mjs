@@ -19,6 +19,7 @@ const ACTIVE = new Set(STEPS.values());
 // Auxiliary planners are gated but do not add fictitious completion stages.
 const ASSET_PLANNERS = new Set(["weaveclaw_plan_scenes", "weaveclaw_plan_props"]);
 const RECOMMENDATION_TOOLS = new Set(["weaveclaw_get_config_recommendation_context", "weaveclaw_propose_config_recommendation"]);
+const QUALITY_TOOLS = new Set(["weaveclaw_verify_first_frames"]);
 // Each is an independent, single-request, read-only project query. The host
 // maintains its own identical allowlist and remains the authority.
 export const PARALLEL_READS = new Set(["weaveclaw_get_project", "weaveclaw_list_characters", "weaveclaw_list_episodes",
@@ -116,7 +117,8 @@ export function createWorkflow(toolNames, last_episode = null, batch = null, sco
   if (batch !== null && (!Number.isSafeInteger(batch.start) || !Number.isSafeInteger(batch.end) ||
       batch.start < 1 || batch.end > 10000 || batch.start > batch.end || batch.end - batch.start + 1 > 20 ||
       (batch.current !== undefined && (!Number.isSafeInteger(batch.current) || batch.current < batch.start || batch.current > batch.end)) ||
-      (batch.allow_write !== undefined && typeof batch.allow_write !== "boolean"))) throw new RangeError("invalid_batch");
+      (batch.allow_write !== undefined && typeof batch.allow_write !== "boolean") ||
+      (batch.quality_required !== undefined && typeof batch.quality_required !== "boolean"))) throw new RangeError("invalid_batch");
   // Copy caller-owned bounds; each episode requires its own fresh facts.
   const range = batch === null ? null : { start: batch.start, end: batch.end };
   let current = batch?.current ?? range?.start;
@@ -174,7 +176,7 @@ export function createWorkflow(toolNames, last_episode = null, batch = null, sco
         progressProject = progress && typeof args?.project_id === "string" ? args.project_id : null;
         recommendationContext = null;
         recommendations = null;
-        if (range && progress && progress.active.size === 0 && !["running", "failed", "cancelled"].includes(progress.source.ingest) && completion(progress).step === STEPS.size) {
+        if (range && progress && progress.active.size === 0 && !["running", "failed", "cancelled"].includes(progress.source.ingest) && completion(progress).step === STEPS.size && (!batch.quality_required || progress.ep.first_frames_quality === true)) {
           current++;
           if (current <= range.end) progress = null;
         }
@@ -216,6 +218,7 @@ export function createWorkflow(toolNames, last_episode = null, batch = null, sco
         const identitiesDetected = sketchesReady && ep.identity_detected === ep.beats;
         const videoPromptsReady = ep.beats > 0 && ep.video_prompt_present === ep.beats;
         const framesReady = ep.beats > 0 && ep.first_frames_present === ep.beats;
+        if (batch?.quality_required && framesReady && ep.first_frames_quality === null) allowed.add("weaveclaw_verify_first_frames");
         const audioReady = ep.beats > 0 && ep.audio_current !== null && ep.audio_current + ep.audio_confirmed === ep.beats;
         const videoReady = ep.beats > 0 && ep.video_current !== null && ep.video_current + ep.video_confirmed === ep.beats;
         permit("weaveclaw_detect_sketch_identities", sketchesReady);
@@ -246,6 +249,7 @@ export function createWorkflow(toolNames, last_episode = null, batch = null, sco
         else if (ep.video_prompt_present === null) reason = null;
         else if (!videoPromptsReady) [reason, next] = ["global_optimize_required", "weaveclaw_optimize_video_global"];
          else if (!framesReady) [reason, next] = ["first_frames_required", "weaveclaw_render_first_frames"];
+         else if (batch?.quality_required && ep.first_frames_quality === null) [reason, next] = ["quality_verify_required", "weaveclaw_verify_first_frames"];
          // The host owns the retry counter; repeated planning cannot spend it.
          else if (ep.first_frames_quality === false && ep.retry_count === 0) [reason, next, checkpoint] = ["quality_retry", "weaveclaw_render_first_frames", true];
          else if (ep.first_frames_quality === false) [reason, checkpoint] = ["quality_failed", true];
@@ -263,7 +267,7 @@ export function createWorkflow(toolNames, last_episode = null, batch = null, sco
         else [reason, next] = ["delivery", "weaveclaw_get_final_video"];
       }
       const tools = available.filter((name) => !(name === "weaveclaw_update_project" && recommendationContext) &&
-        ((!STEPS.has(name) && !ASSET_PLANNERS.has(name) && !RECOMMENDATION_TOOLS.has(name)) || allowed.has(name)));
+        ((!STEPS.has(name) && !ASSET_PLANNERS.has(name) && !RECOMMENDATION_TOOLS.has(name) && !QUALITY_TOOLS.has(name)) || allowed.has(name)));
       const parallel_tools = tools.filter((name) => PARALLEL_READS.has(name));
       const feedback = completion(progress);
       // Only the verified completed prefix is skipped. It is recalculated on
