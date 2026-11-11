@@ -10,9 +10,10 @@
 |------|------|------|
 | `workflow.mjs` STEPS（全 14 个工具，覆盖 21 步流水线） | ✅ 已实现 | 含 global_optimize / audio / video / compose / delivery |
 | `plan()` 后半程链路（视频优化→首帧→音频→视频→合成→成片） | ✅ 已实现 | - |
+| `review_first_frames` 可选检查点（checkpoint:true，不阻断） | ✅ 已实现 | 首帧就绪、音频未开始时 `plan()` 标记；音频工具保持解锁 |
 | `facts()` 新字段校验（video_prompt_present / audio_present / video_present / composed） | ✅ 已实现 | 含越界校验，新字段可选，缺省为 0 |
 | `strategy.mjs` 中文 + 小织身份 + 两种模式 + 大任务拆解 | ✅ 已实现 | - |
-| `workflow.test.mjs` 后半程测试（3 个新用例） | ✅ 已实现 | 含越界校验和新字段默认值 |
+| `workflow.test.mjs` 后半程测试 | ✅ 已实现 | 覆盖 6 个 reason 节点、检查点触发/跳过、新字段缺省/边界/越界 |
 | 跨轮集数记忆（`turn.start` 帧携带 `last_episode`） | ⬜ 待实现 | P1 |
 | 场景/道具工具受 `allows()` 管控 | ⬜ 待实现 | P2 |
 | 草图 stale 时产生用户可见 reason | ⬜ 待实现 | P2 |
@@ -79,6 +80,8 @@
 | 11. 逐 beat 视频 | `weaveclaw_start_single_video` | 视频片段 |
 | 12. 合成导出 | `weaveclaw_compose_episode` | 最终成片 |
 | 13. 成片展示 | `weaveclaw_get_final_video` | 成片链接 |
+
+**可选检查点 review_first_frames**：首帧全部就绪且音频未开始（`audio_present === 0`）时，`plan()` 标记 `{ reason: "review_first_frames", next_tool: null, checkpoint: true }`，提示询问用户是否检查首帧。检查点不阻断流水线——`weaveclaw_generate_audio` 保持解锁，用户跳过审查（或选择自动推进）后直接生成音频，链路自动进入 `audio_required`。
 
 **草图 stale 警告**：`ep.sketches_stale > 0` 时，建议用户先重新生成草图再继续，提示服装外观可能错乱（P2 阶段在 workflow 层面加 reason）。
 

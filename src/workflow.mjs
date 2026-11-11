@@ -61,7 +61,7 @@ export function createWorkflow(toolNames) {
     },
     plan() {
       const allowed = new Set();
-      let reason = null, next = null;
+      let reason = null, next = null, checkpoint = false;
       if (progress) {
         const { source, project, ep, active } = progress;
         const permit = (name, condition) => { if (condition && !active.has(STEPS.get(name))) allowed.add(name); };
@@ -97,14 +97,15 @@ export function createWorkflow(toolNames) {
         else if (ep.identity_detected !== ep.beats) [reason, next] = ["identity_detection_required", "weaveclaw_detect_sketch_identities"];
         else if (!videoPromptsReady) [reason, next] = ["global_optimize_required", "weaveclaw_optimize_video_global"];
         else if (!framesReady) [reason, next] = ["first_frames_required", "weaveclaw_render_first_frames"];
-        else if (!audioReady) [reason, next] = ["audio_required", "weaveclaw_generate_audio"];
+        else if (!audioReady && ep.audio_present > 0) [reason, next] = ["audio_required", "weaveclaw_generate_audio"];
+        else if (!audioReady) [reason, checkpoint] = ["review_first_frames", true];
         else if (!videoReady) [reason, next] = ["video_required", "weaveclaw_start_single_video"];
         else if (!ep.composed) [reason, next] = ["compose_required", "weaveclaw_compose_episode"];
         else [reason, next] = ["delivery", "weaveclaw_get_final_video"];
       }
       const tools = available.filter((name) => !STEPS.has(name) || allowed.has(name));
       if (next && !tools.includes(next)) return { tools, plan: null };
-      return { tools, plan: reason ? { episode: progress.ep.number, next_tool: next, reason } : null };
+      return { tools, plan: reason ? { episode: progress.ep.number, next_tool: next, reason, ...(checkpoint ? { checkpoint: true } : {}) } : null };
     },
   };
 }

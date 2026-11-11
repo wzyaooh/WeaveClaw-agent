@@ -48,7 +48,12 @@ test("workflow suggests stages and exposes writes only after prerequisites", () 
   data.episode.sketches_missing = 0; expect("identity_detection_required", "weaveclaw_detect_sketch_identities");
   data.episode.identity_detected = 2; expect("global_optimize_required", "weaveclaw_optimize_video_global");
   data.episode.video_prompt_present = 2; expect("first_frames_required", "weaveclaw_render_first_frames");
-  data.episode.first_frames_present = 2; expect("audio_required", "weaveclaw_generate_audio");
+  data.episode.first_frames_present = 2;
+  // 首帧就绪、音频未开始：到达 review_first_frames 可选检查点（不阻断，音频工具保持解锁）
+  observe(workflow, data);
+  assert.deepEqual(workflow.plan().plan, { episode: 1, next_tool: null, reason: "review_first_frames", checkpoint: true });
+  assert.ok(workflow.plan().tools.includes("weaveclaw_generate_audio"));
+  data.episode.audio_present = 1; expect("audio_required", "weaveclaw_generate_audio");
   data.episode.audio_present = 2; expect("video_required", "weaveclaw_start_single_video");
   data.episode.video_present = 2; expect("compose_required", "weaveclaw_compose_episode");
   data.episode.composed = true; observe(workflow, data);
@@ -100,15 +105,21 @@ test("second-half pipeline gates audio, video and compose behind prior stages", 
     video_prompt_present: 3, first_frames_present: 3,
   });
   observe(workflow, data);
-  // Audio should be the next suggested step.
-  assert.equal(workflow.plan().plan.reason, "audio_required");
-  assert.equal(workflow.plan().plan.next_tool, "weaveclaw_generate_audio");
+  // 首帧就绪、音频未开始：先到达 review_first_frames 可选检查点，但音频工具不被阻断。
+  assert.equal(workflow.plan().plan.reason, "review_first_frames");
+  assert.equal(workflow.plan().plan.next_tool, null);
+  assert.equal(workflow.plan().plan.checkpoint, true);
   assert.ok(workflow.plan().tools.includes("weaveclaw_generate_audio"));
   // Video tool is still hidden (audio not done).
   assert.equal(workflow.plan().tools.includes("weaveclaw_start_single_video"), false);
   // Compose and final_video are hidden too.
   assert.equal(workflow.plan().tools.includes("weaveclaw_compose_episode"), false);
   assert.equal(workflow.plan().tools.includes("weaveclaw_get_final_video"), false);
+
+  // 音频开始后（跳过审查）链路自动进入 audio_required。
+  data.episode.audio_present = 1; observe(workflow, data);
+  assert.equal(workflow.plan().plan.reason, "audio_required");
+  assert.equal(workflow.plan().plan.next_tool, "weaveclaw_generate_audio");
 
   data.episode.audio_present = 3; observe(workflow, data);
   assert.equal(workflow.plan().plan.reason, "video_required");
