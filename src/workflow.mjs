@@ -1,19 +1,19 @@
 /** Local workflow suggestions; the host still owns authorization and effects. */
 const STEPS = new Map([
-  ["dramaclaw_start_ingest", "ingest"],
-  ["dramaclaw_build_characters", "characters"],
-  ["dramaclaw_plan_episodes", "episodes"],
-  ["dramaclaw_plan_identities", "identity_plan"],
-  ["dramaclaw_generate_script", "script"],
-  ["dramaclaw_assign_sketch_colors", "sketches"],
-  ["dramaclaw_generate_sketches", "sketches"],
-  ["dramaclaw_detect_sketch_identities", "sketches"],
-  ["dramaclaw_optimize_video_global", "global_optimize"],
-  ["dramaclaw_render_first_frames", "first_frames"],
-  ["dramaclaw_generate_audio", "audio"],
-  ["dramaclaw_start_single_video", "video"],
-  ["dramaclaw_compose_episode", "compose"],
-  ["dramaclaw_get_final_video", "delivery"],
+  ["weaveclaw_start_ingest", "ingest"],
+  ["weaveclaw_build_characters", "characters"],
+  ["weaveclaw_plan_episodes", "episodes"],
+  ["weaveclaw_plan_identities", "identity_plan"],
+  ["weaveclaw_generate_script", "script"],
+  ["weaveclaw_assign_sketch_colors", "sketches"],
+  ["weaveclaw_generate_sketches", "sketches"],
+  ["weaveclaw_detect_sketch_identities", "sketches"],
+  ["weaveclaw_optimize_video_global", "global_optimize"],
+  ["weaveclaw_render_first_frames", "first_frames"],
+  ["weaveclaw_generate_audio", "audio"],
+  ["weaveclaw_start_single_video", "video"],
+  ["weaveclaw_compose_episode", "compose"],
+  ["weaveclaw_get_final_video", "delivery"],
 ]);
 const ACTIVE = new Set(STEPS.values());
 const count = (x) => Number.isSafeInteger(x) && x >= 0;
@@ -55,7 +55,7 @@ export function createWorkflow(toolNames) {
       return Boolean(progress && (!Object.hasOwn(args, "episode") || args.episode === progress.ep.number));
     },
     observe(name, args, value) {
-      if (name === "dramaclaw_get_creation_progress") {
+      if (name === "weaveclaw_get_creation_progress") {
         progress = value?.ok === true && value.final === false ? facts(value.result, args?.episode) : null;
       }
     },
@@ -65,42 +65,42 @@ export function createWorkflow(toolNames) {
       if (progress) {
         const { source, project, ep, active } = progress;
         const permit = (name, condition) => { if (condition && !active.has(STEPS.get(name))) allowed.add(name); };
-        permit("dramaclaw_start_ingest", source.uploads > 0);
-        permit("dramaclaw_build_characters", source.imported);
-        permit("dramaclaw_plan_episodes", source.imported && project.characters > 0 && (project.episodes === 0 || ep.exists));
-        permit("dramaclaw_plan_identities", ep.exists && project.characters > 0);
-        permit("dramaclaw_generate_script", ep.exists && ep.identity_planned);
-        permit("dramaclaw_assign_sketch_colors", ep.exists && ep.beats > 0);
-        permit("dramaclaw_generate_sketches", ep.exists && ep.beats > 0 && ep.all_beats_have_content);
+        permit("weaveclaw_start_ingest", source.uploads > 0);
+        permit("weaveclaw_build_characters", source.imported);
+        permit("weaveclaw_plan_episodes", source.imported && project.characters > 0 && (project.episodes === 0 || ep.exists));
+        permit("weaveclaw_plan_identities", ep.exists && project.characters > 0);
+        permit("weaveclaw_generate_script", ep.exists && ep.identity_planned);
+        permit("weaveclaw_assign_sketch_colors", ep.exists && ep.beats > 0);
+        permit("weaveclaw_generate_sketches", ep.exists && ep.beats > 0 && ep.all_beats_have_content);
         const sketchesReady = ep.beats > 0 && ep.sketches_missing === 0 && ep.sketches_stale === 0;
         const identitiesDetected = sketchesReady && ep.identity_detected === ep.beats;
         const videoPromptsReady = ep.beats > 0 && ep.video_prompt_present === ep.beats;
         const framesReady = ep.beats > 0 && ep.first_frames_present === ep.beats;
         const audioReady = ep.beats > 0 && ep.audio_present === ep.beats;
         const videoReady = ep.beats > 0 && ep.video_present === ep.beats;
-        permit("dramaclaw_detect_sketch_identities", sketchesReady);
-        permit("dramaclaw_optimize_video_global", identitiesDetected);
-        permit("dramaclaw_render_first_frames", identitiesDetected && videoPromptsReady);
-        permit("dramaclaw_generate_audio", framesReady);
-        permit("dramaclaw_start_single_video", framesReady && audioReady);
-        permit("dramaclaw_compose_episode", framesReady && audioReady && videoReady);
-        permit("dramaclaw_get_final_video", ep.composed);
+        permit("weaveclaw_detect_sketch_identities", sketchesReady);
+        permit("weaveclaw_optimize_video_global", identitiesDetected);
+        permit("weaveclaw_render_first_frames", identitiesDetected && videoPromptsReady);
+        permit("weaveclaw_generate_audio", framesReady);
+        permit("weaveclaw_start_single_video", framesReady && audioReady);
+        permit("weaveclaw_compose_episode", framesReady && audioReady && videoReady);
+        permit("weaveclaw_get_final_video", ep.composed);
         if (active.size) reason = "await_task";
         else if (!source.imported && !source.uploads) reason = "source_missing";
-        else if (!source.imported) [reason, next] = ["ingest_required", "dramaclaw_start_ingest"];
-        else if (!project.characters) [reason, next] = ["characters_required", "dramaclaw_build_characters"];
-        else if (!project.episodes) [reason, next] = ["episodes_required", "dramaclaw_plan_episodes"];
+        else if (!source.imported) [reason, next] = ["ingest_required", "weaveclaw_start_ingest"];
+        else if (!project.characters) [reason, next] = ["characters_required", "weaveclaw_build_characters"];
+        else if (!project.episodes) [reason, next] = ["episodes_required", "weaveclaw_plan_episodes"];
         else if (!ep.exists) reason = null;
-        else if (!ep.identity_planned) [reason, next] = ["identity_plan_required", "dramaclaw_plan_identities"];
-        else if (!ep.beats || !ep.all_beats_have_content) [reason, next] = ["script_required", "dramaclaw_generate_script"];
-        else if (!sketchesReady) [reason, next] = ["sketches_required", "dramaclaw_generate_sketches"];
-        else if (ep.identity_detected !== ep.beats) [reason, next] = ["identity_detection_required", "dramaclaw_detect_sketch_identities"];
-        else if (!videoPromptsReady) [reason, next] = ["global_optimize_required", "dramaclaw_optimize_video_global"];
-        else if (!framesReady) [reason, next] = ["first_frames_required", "dramaclaw_render_first_frames"];
-        else if (!audioReady) [reason, next] = ["audio_required", "dramaclaw_generate_audio"];
-        else if (!videoReady) [reason, next] = ["video_required", "dramaclaw_start_single_video"];
-        else if (!ep.composed) [reason, next] = ["compose_required", "dramaclaw_compose_episode"];
-        else [reason, next] = ["delivery", "dramaclaw_get_final_video"];
+        else if (!ep.identity_planned) [reason, next] = ["identity_plan_required", "weaveclaw_plan_identities"];
+        else if (!ep.beats || !ep.all_beats_have_content) [reason, next] = ["script_required", "weaveclaw_generate_script"];
+        else if (!sketchesReady) [reason, next] = ["sketches_required", "weaveclaw_generate_sketches"];
+        else if (ep.identity_detected !== ep.beats) [reason, next] = ["identity_detection_required", "weaveclaw_detect_sketch_identities"];
+        else if (!videoPromptsReady) [reason, next] = ["global_optimize_required", "weaveclaw_optimize_video_global"];
+        else if (!framesReady) [reason, next] = ["first_frames_required", "weaveclaw_render_first_frames"];
+        else if (!audioReady) [reason, next] = ["audio_required", "weaveclaw_generate_audio"];
+        else if (!videoReady) [reason, next] = ["video_required", "weaveclaw_start_single_video"];
+        else if (!ep.composed) [reason, next] = ["compose_required", "weaveclaw_compose_episode"];
+        else [reason, next] = ["delivery", "weaveclaw_get_final_video"];
       }
       const tools = available.filter((name) => !STEPS.has(name) || allowed.has(name));
       if (next && !tools.includes(next)) return { tools, plan: null };

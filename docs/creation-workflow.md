@@ -65,20 +65,20 @@
 
 | 步骤 | 工具 | 完成后展示 |
 |------|------|------------|
-| 1. 摄入 | `dramaclaw_start_ingest` | pipeline_status 汇总 ingested/configured |
-| 2. 角色提取 | `dramaclaw_build_characters` | 角色列表 |
-| 3. 分集规划 | `dramaclaw_plan_episodes` | 分集列表 |
-| 4. 身份规划 | `dramaclaw_plan_identities` | 身份列表 |
-| 5. 脚本生成 | `dramaclaw_generate_script` | beat 摘要 |
-| 6a. 草图配色 | `dramaclaw_assign_sketch_colors` | — |
-| 6b. 草图生成 | `dramaclaw_generate_sketches` | 草图图片 |
-| 7. 身份检测 | `dramaclaw_detect_sketch_identities` | beat 身份汇总 |
-| 8. 视频优化（video_prompt） | `dramaclaw_optimize_video_global` | beat video_mode/prompt 就绪情况 |
-| 9. 首帧生成 | `dramaclaw_render_first_frames` | 首帧图片 |
-| 10. 音频生成 | `dramaclaw_generate_audio` | 音频播放列表 |
-| 11. 逐 beat 视频 | `dramaclaw_start_single_video` | 视频片段 |
-| 12. 合成导出 | `dramaclaw_compose_episode` | 最终成片 |
-| 13. 成片展示 | `dramaclaw_get_final_video` | 成片链接 |
+| 1. 摄入 | `weaveclaw_start_ingest` | pipeline_status 汇总 ingested/configured |
+| 2. 角色提取 | `weaveclaw_build_characters` | 角色列表 |
+| 3. 分集规划 | `weaveclaw_plan_episodes` | 分集列表 |
+| 4. 身份规划 | `weaveclaw_plan_identities` | 身份列表 |
+| 5. 脚本生成 | `weaveclaw_generate_script` | beat 摘要 |
+| 6a. 草图配色 | `weaveclaw_assign_sketch_colors` | — |
+| 6b. 草图生成 | `weaveclaw_generate_sketches` | 草图图片 |
+| 7. 身份检测 | `weaveclaw_detect_sketch_identities` | beat 身份汇总 |
+| 8. 视频优化（video_prompt） | `weaveclaw_optimize_video_global` | beat video_mode/prompt 就绪情况 |
+| 9. 首帧生成 | `weaveclaw_render_first_frames` | 首帧图片 |
+| 10. 音频生成 | `weaveclaw_generate_audio` | 音频播放列表 |
+| 11. 逐 beat 视频 | `weaveclaw_start_single_video` | 视频片段 |
+| 12. 合成导出 | `weaveclaw_compose_episode` | 最终成片 |
+| 13. 成片展示 | `weaveclaw_get_final_video` | 成片链接 |
 
 **草图 stale 警告**：`ep.sketches_stale > 0` 时，建议用户先重新生成草图再继续，提示服装外观可能错乱（P2 阶段在 workflow 层面加 reason）。
 

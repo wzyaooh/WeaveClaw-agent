@@ -26,8 +26,8 @@ const result = (final = false) => ({ kind: "tool.call", value: { final, ok: true
 
 test("turn reads target progress before showing the eligible creative write", async () => {
   const episodeSchema = { type: "object", properties: { episode: { type: "integer" } }, required: ["episode"], additionalProperties: false };
-  const progress = { ...tool, name: "dramaclaw_get_creation_progress", parameters: episodeSchema };
-  const script = { ...progress, name: "dramaclaw_generate_script" };
+  const progress = { ...tool, name: "weaveclaw_get_creation_progress", parameters: episodeSchema };
+  const script = { ...progress, name: "weaveclaw_generate_script" };
   const requests = [];
   const host = { async request(kind, payload) {
     requests.push({ kind, payload });
@@ -50,8 +50,8 @@ test("turn reads target progress before showing the eligible creative write", as
 
 test("progress for one episode cannot authorize a different episode", async () => {
   const schema = { type: "object", properties: { episode: { type: "integer" } }, required: ["episode"], additionalProperties: false };
-  const progress = { ...tool, name: "dramaclaw_get_creation_progress", parameters: schema };
-  const script = { ...progress, name: "dramaclaw_generate_script" };
+  const progress = { ...tool, name: "weaveclaw_get_creation_progress", parameters: schema };
+  const script = { ...progress, name: "weaveclaw_generate_script" };
   const requests = [];
   const host = { async request(kind, payload) {
     requests.push({ kind, payload });
