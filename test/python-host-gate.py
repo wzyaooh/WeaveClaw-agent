@@ -8,6 +8,7 @@ import tempfile
 from pathlib import Path
 from contextlib import closing
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
 import uvicorn
 from fastapi import FastAPI
@@ -29,7 +30,11 @@ if not NODE:
 
 class Model:
     profile = SimpleNamespace(supports_tools=True)
-    def __init__(self, expected_reason, resumed=False): self.calls = 0; self.expected_reason = expected_reason; self.resumed = resumed
+    def __init__(self, expected_reason, resumed=False, write_tool=None):
+        self.calls = 0
+        self.expected_reason = expected_reason
+        self.resumed = resumed
+        self.write_tool = write_tool
     async def request(self, messages, settings, parameters):
         self.calls += 1
         assert '管线顺序：' in messages[0].parts[0].content
@@ -37,6 +42,7 @@ class Model:
         assert messages[1].parts[0].content == 'previous user message'
         if self.calls == 1:
             assert 'weaveclaw_generate_script' not in {item.name for item in parameters.function_tools}
+            assert not {'weaveclaw_plan_scenes', 'weaveclaw_plan_props'} & {item.name for item in parameters.function_tools}
             if self.resumed:
                 assert 'reason=progress_required' in messages[0].parts[0].content
             return ModelResponse(parts=[TextPart('先读取素材'), ToolCallPart('weaveclaw_get_creation_progress', {'episode': 2}, 'read-1')],
@@ -49,6 +55,14 @@ class Model:
             assert not {'weaveclaw_start_single_video', 'weaveclaw_compose_episode', 'weaveclaw_get_final_video'} & {item.name for item in parameters.function_tools}
         assert any(isinstance(part, ToolReturnPart) and part.content['data']['episode']['number'] == 2
                    for message in messages for part in message.parts)
+        actual = next(part.content['data'] for message in messages for part in message.parts
+                      if isinstance(part, ToolReturnPart) and 'episode' in part.content.get('data', {}))
+        episode = actual['episode']
+        ready = episode['exists'] and episode['beats'] > 0 and episode['all_beats_have_content'] and 'script' not in actual['active_steps']
+        assert ({'weaveclaw_plan_scenes', 'weaveclaw_plan_props'} <= {item.name for item in parameters.function_tools}) == ready
+        if self.write_tool:
+            return ModelResponse(parts=[ToolCallPart(self.write_tool, {'episode': 2}, 'plan-1')],
+                                 finish_reason='tool_call', model_name='mock')
         if self.expected_reason != 'script_required':
             return ModelResponse(parts=[TextPart('已收到进度建议')], finish_reason='stop', model_name='mock')
         return ModelResponse(parts=[ToolCallPart('weaveclaw_generate_script', {'episode': 2}, 'call-1')],
@@ -61,8 +75,8 @@ class Dispatcher:
                       for spec in TOOL_SPECS.values()]
         return real_tools
     def validate(self, name, args):
-        assert name in ('weaveclaw_get_creation_progress', 'weaveclaw_generate_script') and args == {'episode': 2}
-        return SimpleNamespace(writes=name == 'weaveclaw_generate_script')
+        assert name in ('weaveclaw_get_creation_progress', 'weaveclaw_generate_script', 'weaveclaw_plan_scenes', 'weaveclaw_plan_props') and args == {'episode': 2}
+        return SimpleNamespace(writes=name != 'weaveclaw_get_creation_progress')
     async def dispatch(self, name, args):
         self.calls.append((name, args))
         if name == 'weaveclaw_get_creation_progress':
@@ -177,6 +191,7 @@ class Dispatcher:
         result = await creation_progress(ctx, store, 2)
         if self.scenario == 'real_resume':
             self.resume_context = (ctx, store)
+            self.resume_beats = beats
         if stage in ('audio_stale', 'audio_accepted', 'audio_rejected', 'audio_changed'):
             creation_repository._databases.pop(str(output.resolve()), None)
         if stage == 'audio_stale':
@@ -239,6 +254,44 @@ async def main():
             assert len(bindings) == 1 and len(bindings[0]) == 64
             assert result.write_attempted == (scenario == 'script_required')
             assert model.calls == 2 and dispatcher.calls == expected_calls
+        for tool in ('weaveclaw_plan_scenes', 'weaveclaw_plan_props'):
+            dispatcher = Dispatcher('real_global_optimize_required', Path(temp.name) / tool)
+            model = Model('global_optimize_required', write_tool=tool)
+            result = await asyncio.wait_for(OrchestratorRuntime(link=app.state.orchestrator_link, model=model,
+                dispatcher=dispatcher, stream=False).run('plan episode assets', scope='project', bind_strategy=bind_strategy,
+                    history=[{'role': 'user', 'content': 'previous user message'}]), 10)
+            assert result.write_attempted and model.calls == 2
+            assert dispatcher.calls == [('weaveclaw_get_creation_progress', {'episode': 2}), (tool, {'episode': 2})]
+        from novelvideo.chat.business_tools import BusinessToolDispatcher, BusinessToolError
+        for tool in ('weaveclaw_plan_scenes', 'weaveclaw_plan_props'):
+            for changed in (False, True):
+                fixture = Dispatcher('real_resume', Path(temp.name) / f'{tool}-{changed}')
+                requests, claim = [], AsyncMock(return_value=True)
+                async def request(method, path, *, query=None, body=None):
+                    requests.append((method, path))
+                    if method == 'GET':
+                        if changed and len(requests) == 2:
+                            fixture.resume_beats.clear()
+                        return {'ok': True, 'data': await fixture.real_progress()}
+                    return {'ok': True, 'task_id': 'fixture-task'}
+                dispatcher = BusinessToolDispatcher(project_id='fixture-project', request=request,
+                    authorize=AsyncMock(), claim_write=claim)
+                model = Model('video_required', write_tool=tool)
+                with patch('novelvideo.chat.business_tools._plan_allows_tool', return_value=True), \
+                        patch('novelvideo.chat.business_tools.preflight_tool_dependencies'):
+                    runtime = OrchestratorRuntime(link=app.state.orchestrator_link, model=model,
+                        dispatcher=dispatcher, stream=False)
+                    try:
+                        result = await asyncio.wait_for(runtime.run('plan episode assets', scope='project',
+                            bind_strategy=bind_strategy, history=[{'role': 'user', 'content': 'previous user message'}]), 10)
+                    except BusinessToolError as exc:
+                        assert changed and str(exc) == 'existing_beats_required'
+                        claim.assert_not_awaited()
+                        assert [method for method, _ in requests] == ['GET', 'GET']
+                    else:
+                        assert not changed and result.write_attempted
+                        claim.assert_awaited_once()
+                        assert [method for method, _ in requests] == ['GET', 'GET', 'POST']
         from novelvideo.chat.store import ChatScope, ChatStore
         class ProjectChat(ChatStore):
             def db_for(self, username, scope):
@@ -264,7 +317,7 @@ async def main():
             assert not result.write_attempted and model.calls == 2
             assert messages.last_creation_episode('user', scope, 'principal') == (2 if index < 2 else None)
         temp.cleanup()
-        print('Python–Pi local WebSocket: verified host write, checkpoints, fresh cross-turn resume, changed media and deleted episode')
+        print('Python–Pi local WebSocket: verified asset planner gates, host recheck, resume and media changes')
     finally:
         if ELECTRON:
             server.should_exit = True

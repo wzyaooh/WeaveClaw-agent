@@ -463,6 +463,57 @@ test("resumed episode only suggests reading progress and fresh target facts take
   assert.equal(createWorkflow(["read_other"], 7).plan().plan, null);
 });
 
+test("场景和道具规划仅在目标集的 beat 内容就绪且脚本未运行时可用", () => {
+  const planners = ["weaveclaw_plan_scenes", "weaveclaw_plan_props"];
+  const workflow = createWorkflow([...names, ...planners], 1);
+  const data = initial();
+  const update = (value = { ok: true, final: false, result: { ok: true, data: freshFixture(data) } }) =>
+    workflow.observe(names[0], { episode: 1 }, value);
+  const expectAvailable = (expected) => {
+    for (const tool of planners) {
+      assert.equal(workflow.plan().tools.includes(tool), expected);
+      assert.equal(workflow.allows(tool, { episode: 1 }), expected);
+      assert.equal(workflow.allows(tool, { episode: 2 }), false);
+    }
+  };
+  expectAvailable(false);
+  data.episode.exists = true;
+  update(); expectAvailable(false);
+  data.episode.beats = 2;
+  update(); expectAvailable(false);
+  data.episode.all_beats_have_content = true;
+  update(); expectAvailable(true);
+  assert.equal(workflow.plan().progress.total, 14);
+  data.active_steps = ["script"];
+  update(); expectAvailable(false);
+  data.active_steps = [];
+  update(); expectAvailable(true);
+  update({ ok: false, final: false, result: { ok: false } }); expectAvailable(false);
+  update(); expectAvailable(true);
+  data.episode.exists = false;
+  update(); expectAvailable(false);
+});
+
+test("场景和道具规划不会复用其他项目或其他集数的进度", () => {
+  const planners = ["weaveclaw_plan_scenes", "weaveclaw_plan_props"];
+  const data = initial();
+  Object.assign(data.episode, { exists: true, beats: 1, all_beats_have_content: true });
+  const reply = { ok: true, final: false, result: { ok: true, data: freshFixture(data) } };
+  const home = createWorkflow([...names, ...planners], null, null, "home");
+  home.observe(names[0], { episode: 1, project_id: "project-a" }, reply);
+  for (const tool of planners) {
+    assert.equal(home.allows(tool, { episode: 1, project_id: "project-a" }), true);
+    assert.equal(home.allows(tool, { episode: 1, project_id: "project-b" }), false);
+    assert.equal(home.allows(tool, { episode: 1 }), false);
+    assert.equal(home.allows(tool, { episode: 2, project_id: "project-a" }), false);
+  }
+  home.observe(names[0], { episode: 1 }, reply);
+  for (const tool of planners) assert.equal(home.plan().tools.includes(tool), false);
+  const project = createWorkflow([...names, ...planners], null, null, "project");
+  project.observe(names[0], { episode: 1 }, reply);
+  for (const tool of planners) assert.equal(project.allows(tool, { episode: 1 }), true);
+});
+
 test("重连读取目标集后从首个未完成步骤续接，不依赖本轮完成历史", () => {
   const data = initial();
   data.episode.number = 7;

@@ -197,7 +197,7 @@ export function createTurn(input) {
       },
     };
   });
-  const workflow = createWorkflow([...names], last_episode);
+  const workflow = createWorkflow([...names], last_episode, null, scope);
   const streamFn = (_model, context, options) => {
     const stream = createAssistantMessageEventStream();
     const signal = options.signal;

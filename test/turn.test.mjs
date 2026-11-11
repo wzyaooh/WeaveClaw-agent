@@ -82,6 +82,31 @@ test("progress for one episode cannot authorize a different episode", async () =
   assert.deepEqual(requests.map((item) => item.kind), ["model.call", "tool.call", "model.call"]);
 });
 
+test("asset planning is exposed only after a ready read and rejects another episode", async () => {
+  const schema = { type: "object", properties: { episode: { type: "integer" } }, required: ["episode"], additionalProperties: false };
+  const progress = { ...tool, name: "weaveclaw_get_creation_progress", parameters: schema };
+  const scene = { ...tool, name: "weaveclaw_plan_scenes", parameters: schema };
+  for (const target of [1, 2]) {
+    const requests = [];
+    const host = { async request(kind, payload) {
+      requests.push({ kind, payload });
+      if (kind === "tool.call" && payload.name === progress.name) return { ok: true, final: false, result: { ok: true, data: {
+        version: 1, source: { uploads: 1, imported: true }, project: { characters: 1, episodes: 2 },
+        episode: { number: 1, exists: true, identity_planned: true, beats: 1, all_beats_have_content: true,
+          sketches_missing: 1, sketches_stale: 0, identity_detected: 0, first_frames_present: 0 }, active_steps: [],
+      } } };
+      if (kind === "tool.call") return { ok: true, final: true, result: { ok: true } };
+      return requests.length === 1 ? { parts: [{ ...call(progress.name), arguments: { episode: 1 } }] }
+        : { parts: [{ ...call(scene.name), id: "scene-write", arguments: { episode: target } }] };
+    } };
+    const result = await createTurn({ scope: "project", prompt: "规划场景", history: [], tools: [progress, scene], host }).run();
+    assert.deepEqual(requests[0].payload.tools, [progress.name]);
+    assert.ok(requests[2].payload.tools.includes(scene.name));
+    assert.equal(result.error, target === 1 ? undefined : "host_model_failed");
+    assert.equal(requests.filter((item) => item.kind === "tool.call" && item.payload.name === scene.name).length, target === 1 ? 1 : 0);
+  }
+});
+
 test("Pi asks the host for model and tool work and stops after a write", async () => {
   const host = mockHost([model(call("write_project")), result(true)]);
   const turn = createTurn({ scope: "project", prompt: "当前创作目标", history: [], tools: [write], host });

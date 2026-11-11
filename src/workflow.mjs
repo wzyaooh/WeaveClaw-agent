@@ -16,6 +16,8 @@ const STEPS = new Map([
   ["weaveclaw_get_final_video", "delivery"],
 ]);
 const ACTIVE = new Set(STEPS.values());
+// Auxiliary planners are gated but do not add fictitious completion stages.
+const ASSET_PLANNERS = new Set(["weaveclaw_plan_scenes", "weaveclaw_plan_props"]);
 const count = (x) => Number.isSafeInteger(x) && x >= 0;
 
 function completion(progress) {
@@ -101,7 +103,7 @@ function facts(result, episode) {
   };
 }
 
-export function createWorkflow(toolNames, last_episode = null, batch = null) {
+export function createWorkflow(toolNames, last_episode = null, batch = null, scope = "project") {
   if (batch !== null && (!Number.isSafeInteger(batch.start) || !Number.isSafeInteger(batch.end) ||
       batch.start < 1 || batch.end > 10000 || batch.start > batch.end)) throw new RangeError("invalid_batch");
   // Copy caller-owned bounds; each episode requires its own fresh facts.
@@ -109,8 +111,20 @@ export function createWorkflow(toolNames, last_episode = null, batch = null) {
   let current = range?.start;
   const available = [...toolNames];
   let progress = null;
+  let progressProject = null;
+  const beatsReady = () => progress !== null && progress.ep.exists && progress.ep.beats > 0 &&
+    progress.ep.all_beats_have_content && !progress.active.has("script");
   return {
     allows(name, args) {
+      if (ASSET_PLANNERS.has(name)) {
+        if (!beatsReady() || args?.episode !== progress.ep.number) return false;
+        const target = args?.project_id ?? null;
+        // In project scope Python binds the implicit project; home requires an
+        // explicit project on both the progress read and the planner write.
+        return scope === "project"
+          ? progressProject === null || target === null || target === progressProject
+          : progressProject !== null && target === progressProject;
+      }
       if (!STEPS.has(name)) return true;
       if (!progress || (Object.hasOwn(args, "episode") && args.episode !== progress.ep.number)) return false;
       if (last_episode === progress.ep.number && !progress.ep.exists && Object.hasOwn(args, "episode")) return false;
@@ -131,6 +145,7 @@ export function createWorkflow(toolNames, last_episode = null, batch = null) {
       if (name === "weaveclaw_get_creation_progress") {
         if (range && (current > range.end || args?.episode !== current)) return;
         progress = value?.ok === true && value.final === false ? facts(value.result, args?.episode) : null;
+        progressProject = progress && typeof args?.project_id === "string" ? args.project_id : null;
         if (range && progress && progress.active.size === 0 && completion(progress).step === STEPS.size) {
           current++;
           if (current <= range.end) progress = null;
@@ -144,6 +159,9 @@ export function createWorkflow(toolNames, last_episode = null, batch = null) {
       if (progress) {
         const { source, project, ep, active } = progress;
         const permit = (name, condition) => { if (condition && !active.has(STEPS.get(name))) allowed.add(name); };
+        if (beatsReady() && (scope === "project" || progressProject !== null)) {
+          for (const name of ASSET_PLANNERS) allowed.add(name);
+        }
         permit("weaveclaw_start_ingest", source.uploads > 0);
         permit("weaveclaw_build_characters", source.imported);
         permit("weaveclaw_plan_episodes", source.imported && project.characters > 0 && (project.episodes === 0 || ep.exists));
@@ -201,7 +219,7 @@ export function createWorkflow(toolNames, last_episode = null, batch = null) {
         else if (ep.composed_freshness === "stale") [reason, checkpoint] = ["composition_stale", true];
         else [reason, next] = ["delivery", "weaveclaw_get_final_video"];
       }
-      const tools = available.filter((name) => !STEPS.has(name) || allowed.has(name));
+      const tools = available.filter((name) => (!STEPS.has(name) && !ASSET_PLANNERS.has(name)) || allowed.has(name));
       const feedback = completion(progress);
       const target = range ? current : last_episode;
       if (!progress && target !== null && tools.includes("weaveclaw_get_creation_progress")) {
