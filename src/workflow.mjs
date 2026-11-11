@@ -90,6 +90,8 @@ export function createWorkflow(toolNames, last_episode = null) {
         permit("weaveclaw_start_single_video", framesReady && audioReady);
         permit("weaveclaw_compose_episode", framesReady && audioReady && videoReady);
         permit("weaveclaw_get_final_video", ep.composed);
+        // Resume from the first missing prerequisite in fresh facts, not from
+        // a session-local cursor; completed stages must not be suggested again.
         if (active.size) reason = "await_task";
         else if (!source.imported && !source.uploads) reason = "source_missing";
         else if (!source.imported) [reason, next] = ["ingest_required", "weaveclaw_start_ingest"];
@@ -113,6 +115,7 @@ export function createWorkflow(toolNames, last_episode = null) {
       }
       const tools = available.filter((name) => !STEPS.has(name) || allowed.has(name));
       if (!progress && last_episode !== null && tools.includes("weaveclaw_get_creation_progress")) {
+        // last_episode identifies the target only. Read its facts before writes.
         return { tools, plan: { episode: last_episode, next_tool: "weaveclaw_get_creation_progress", reason: "progress_required" } };
       }
       if (next && !tools.includes(next)) return { tools, plan: null };

@@ -77,6 +77,57 @@ test("resumed episode only suggests reading progress and fresh target facts take
   assert.equal(createWorkflow(["read_other"], 7).plan().plan, null);
 });
 
+test("重连读取目标集后从首个未完成步骤续接，不依赖本轮完成历史", () => {
+  const data = initial();
+  data.episode.number = 7;
+  const cases = [
+    [() => { data.source = { uploads: 1, imported: true }; }, "weaveclaw_build_characters"],
+    [() => { data.project.characters = 2; }, "weaveclaw_plan_episodes"],
+    [() => { data.project.episodes = 7; data.episode.exists = true; }, "weaveclaw_plan_identities"],
+    [() => { data.episode.identity_planned = true; }, "weaveclaw_generate_script"],
+    [() => { Object.assign(data.episode, { beats: 3, all_beats_have_content: true, sketches_missing: 2 }); }, "weaveclaw_generate_sketches"],
+    [() => { data.episode.sketches_missing = 0; data.episode.identity_detected = 1; }, "weaveclaw_detect_sketch_identities"],
+    [() => { data.episode.identity_detected = 3; data.episode.video_prompt_present = 1; }, "weaveclaw_optimize_video_global"],
+    [() => { data.episode.video_prompt_present = 3; data.episode.first_frames_present = 1; }, "weaveclaw_render_first_frames"],
+    [() => { data.episode.first_frames_present = 3; data.episode.audio_present = 1; }, "weaveclaw_generate_audio"],
+    [() => { data.episode.audio_present = 3; data.episode.video_present = 1; }, "weaveclaw_start_single_video"],
+    [() => { data.episode.video_present = 3; }, "weaveclaw_compose_episode"],
+    [() => { data.episode.composed = true; }, "weaveclaw_get_final_video"],
+  ];
+  for (const [complete, next_tool] of cases) {
+    complete();
+    // Each case simulates a new connection with no in-memory workflow history.
+    const workflow = createWorkflow(names, 7);
+    assert.deepEqual(workflow.plan().plan, {
+      episode: 7, next_tool: "weaveclaw_get_creation_progress", reason: "progress_required",
+    });
+    workflow.observe(names[0], { episode: 7 }, { ok: true, final: false, result: { ok: true, data } });
+    const proposal = workflow.plan();
+    assert.equal(proposal.plan.episode, 7);
+    assert.equal(proposal.plan.next_tool, next_tool);
+    assert.ok(proposal.tools.includes(next_tool));
+    assert.deepEqual(workflow.plan(), proposal);
+    if (data.episode.composed) assert.equal(proposal.plan.reason, "delivery");
+  }
+});
+
+test("恢复时已有任务只等待，进度刷新失败则重新读取而不沿用旧断点", () => {
+  const workflow = createWorkflow(names, 1), data = initial();
+  Object.assign(data, { source: { uploads: 1, imported: true }, project: { characters: 2, episodes: 1 } });
+  Object.assign(data.episode, { exists: true, identity_planned: true });
+  data.active_steps = ["script"];
+  observe(workflow, data);
+  assert.deepEqual(workflow.plan().plan, { episode: 1, next_tool: null, reason: "await_task" });
+  data.active_steps = [];
+  observe(workflow, data);
+  assert.equal(workflow.plan().plan.next_tool, "weaveclaw_generate_script");
+  workflow.observe(names[0], { episode: 1 }, { ok: false, final: false, result: { ok: false } });
+  assert.deepEqual(workflow.plan(), {
+    tools: [names[0], "read_other"],
+    plan: { episode: 1, next_tool: names[0], reason: "progress_required" },
+  });
+});
+
 test("workflow hides pipeline writes until it receives valid target progress", () => {
   const workflow = createWorkflow(names);
   assert.deepEqual(workflow.plan(), { tools: [names[0], "read_other"], plan: null });
