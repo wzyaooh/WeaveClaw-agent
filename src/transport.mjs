@@ -111,7 +111,8 @@ export async function connectHost({ url, token }) {
     } };
     attempt.turn = createTurn({ tools: frame.payload.tools, prompt: frame.payload.prompt, history: frame.payload.history, scope: frame.payload.scope, limits: frame.payload.limits, last_episode: frame.payload.last_episode, host });
     turns.set(frame.turn_id, attempt);
-    send("turn.accept", frame.turn_id, frame.request_id, { strategy: attempt.turn.strategy, capabilities: { parallel_reads: true } });
+    send("turn.accept", frame.turn_id, frame.request_id, { strategy: attempt.turn.strategy,
+      capabilities: { parallel_reads: true, preflight_parameter_retry: true } });
     void attempt.turn.run().then((result) => finish(frame.turn_id, result.error && !result.aborted ? "turn.error" : "turn.end"),
       () => finish(frame.turn_id, "turn.error"));
   };

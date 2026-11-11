@@ -60,6 +60,7 @@ test("real local socket runs one verified write", { timeout: 10_000 }, async () 
     assert.equal(accepted.request_id, "start-1");
     assert.equal(model.type, "model.call");
     assert.equal(accepted.payload.strategy.id, "creation-v1");
+    assert.deepEqual(accepted.payload.capabilities, { parallel_reads: true, preflight_parameter_retry: true });
     assert.deepEqual(model.payload, { context: [{ ref: "prompt" }], tools: ["write"], plan: null });
     p.send("model.result", "attempt-1", model.request_id,
       { parts: [{ type: "tool_call", id: "call-1", name: "write", arguments: {} }] });

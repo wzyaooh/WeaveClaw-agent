@@ -289,6 +289,57 @@ async def main():
             assert result.write_attempted and model.calls == 2
             assert dispatcher.calls == [('weaveclaw_get_creation_progress', {'episode': 2}), (tool, {'episode': 2})]
         from novelvideo.chat.business_tools import BusinessToolDispatcher, BusinessToolError
+        class RepairModel(Model):
+            def __init__(self, *, valid=False, still_invalid=False):
+                super().__init__('repair')
+                self.valid, self.still_invalid = valid, still_invalid
+            async def request(self, messages, settings, parameters):
+                self.calls += 1
+                assert 'weaveclaw_update_beat' in {item.name for item in parameters.function_tools}
+                args = {'episode': 2, 'beat': 1, 'expected_revision': 'a' * 32}
+                if self.valid or self.calls > 1:
+                    args['audio_type'] = 'invalid' if self.still_invalid else 'narration'
+                if self.calls > 1:
+                    errors = [part.content for message in messages for part in message.parts if isinstance(part, ToolReturnPart)
+                              and isinstance(part.content, dict) and part.content.get('preflight_only') is True]
+                    assert len(errors) == 1
+                return ModelResponse(parts=[ToolCallPart('weaveclaw_update_beat', args, f'edit-{self.calls}')],
+                                     finish_reason='tool_call', model_name='mock')
+        async def retry_request(method, path, *, query=None, body=None):
+            assert method == 'PATCH' and body['audio_type'] == 'narration'
+            return {'ok': True, 'data': {'saved': True}}
+        claim = AsyncMock(return_value=True)
+        request = AsyncMock(side_effect=retry_request)
+        dispatcher = BusinessToolDispatcher(project_id='fixture-project', request=request, authorize=AsyncMock(), claim_write=claim)
+        model = RepairModel()
+        result = await asyncio.wait_for(OrchestratorRuntime(link=app.state.orchestrator_link, model=model,
+            dispatcher=dispatcher, stream=False).run('将第一镜头设为旁白', scope='project', bind_strategy=bind_strategy,
+                history=[{'role': 'user', 'content': 'previous user message'}]), 10)
+        assert result.write_attempted and model.calls == 2
+        claim.assert_awaited_once(); request.assert_awaited_once()
+        # A saved accepted operation is replayed only for the corrected args.
+        claim, request = AsyncMock(), AsyncMock()
+        replay = AsyncMock(return_value={'ok': True, 'data': {'saved': True}})
+        dispatcher = BusinessToolDispatcher(project_id='fixture-project', request=request, authorize=AsyncMock(),
+            claim_write=claim, replay_write=replay)
+        result = await asyncio.wait_for(OrchestratorRuntime(link=app.state.orchestrator_link, model=RepairModel(),
+            dispatcher=dispatcher, stream=False).run('将第一镜头设为旁白', scope='project', bind_strategy=bind_strategy,
+                history=[{'role': 'user', 'content': 'previous user message'}]), 10)
+        assert result.write_attempted and replay.await_args.args[1]['audio_type'] == 'narration'
+        claim.assert_not_awaited(); request.assert_not_awaited()
+        # An uncertain business timeout after the write claim is never retried.
+        claim, request = AsyncMock(return_value=True), AsyncMock(side_effect=TimeoutError())
+        dispatcher = BusinessToolDispatcher(project_id='fixture-project', request=request, authorize=AsyncMock(), claim_write=claim)
+        model = RepairModel(valid=True)
+        try:
+            await asyncio.wait_for(OrchestratorRuntime(link=app.state.orchestrator_link, model=model,
+                dispatcher=dispatcher, stream=False).run('将第一镜头设为旁白', scope='project', bind_strategy=bind_strategy,
+                    history=[{'role': 'user', 'content': 'previous user message'}]), 10)
+        except TimeoutError:
+            assert model.calls == 1 and dispatcher.write_attempted
+            claim.assert_awaited_once(); request.assert_awaited_once()
+        else:
+            raise AssertionError('business timeout must stop the turn')
         fixture = Dispatcher('real_config_recommendation', Path(temp.name) / 'config-recommendation')
         events, requests, claim = [], [], AsyncMock(return_value=True)
         async def config_request(method, path, *, query=None, body=None):

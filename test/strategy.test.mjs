@@ -64,6 +64,12 @@ test("write failure stops the turn without retry", () => {
   assert.ok(creation.text.includes("不重试"));
 });
 
+test("parameter correction only applies before a write and keeps target and revision", () => {
+  assert.ok(creation.text.includes("尚未发起写入"));
+  assert.ok(creation.text.includes("相同目标和版本下修正一次"));
+  assert.ok(creation.text.includes("缺少事实时询问用户，不猜测"));
+});
+
 test("each step delivers its own artifact via host display tools", () => {
   assert.ok(creation.text.includes("每步完成后展示对应产物"));
   assert.ok(creation.text.includes("草图→展示草图"));
