@@ -8,7 +8,12 @@ const STEPS = new Map([
   ["dramaclaw_assign_sketch_colors", "sketches"],
   ["dramaclaw_generate_sketches", "sketches"],
   ["dramaclaw_detect_sketch_identities", "sketches"],
+  ["dramaclaw_optimize_video_global", "global_optimize"],
   ["dramaclaw_render_first_frames", "first_frames"],
+  ["dramaclaw_generate_audio", "audio"],
+  ["dramaclaw_start_single_video", "video"],
+  ["dramaclaw_compose_episode", "compose"],
+  ["dramaclaw_get_final_video", "delivery"],
 ]);
 const ACTIVE = new Set(STEPS.values());
 const count = (x) => Number.isSafeInteger(x) && x >= 0;
@@ -22,13 +27,21 @@ function facts(result, episode) {
       typeof ep.identity_planned !== "boolean" || !count(ep.beats) || typeof ep.all_beats_have_content !== "boolean" ||
       !count(ep.sketches_missing) || !count(ep.sketches_stale) || !count(ep.identity_detected) || !count(ep.first_frames_present) ||
       ep.sketches_missing > ep.beats || ep.sketches_stale > ep.beats || ep.identity_detected > ep.beats || ep.first_frames_present > ep.beats ||
+      (ep.video_prompt_present !== undefined && (!count(ep.video_prompt_present) || ep.video_prompt_present > ep.beats)) ||
+      (ep.audio_present !== undefined && (!count(ep.audio_present) || ep.audio_present > ep.beats)) ||
+      (ep.video_present !== undefined && (!count(ep.video_present) || ep.video_present > ep.beats)) ||
+      (ep.composed !== undefined && typeof ep.composed !== "boolean") ||
       !Array.isArray(active) || active.some((item) => !ACTIVE.has(item)) || new Set(active).size !== active.length) return null;
   return {
     source: { uploads: source.uploads, imported: source.imported },
     project: { characters: project.characters, episodes: project.episodes },
     ep: { number: ep.number, exists: ep.exists, identity_planned: ep.identity_planned, beats: ep.beats,
       all_beats_have_content: ep.all_beats_have_content, sketches_missing: ep.sketches_missing,
-      sketches_stale: ep.sketches_stale, identity_detected: ep.identity_detected, first_frames_present: ep.first_frames_present },
+      sketches_stale: ep.sketches_stale, identity_detected: ep.identity_detected, first_frames_present: ep.first_frames_present,
+      video_prompt_present: ep.video_prompt_present !== undefined ? ep.video_prompt_present : 0,
+      audio_present: ep.audio_present !== undefined ? ep.audio_present : 0,
+      video_present: ep.video_present !== undefined ? ep.video_present : 0,
+      composed: ep.composed === true },
     active: new Set(active),
   };
 }
@@ -60,8 +73,18 @@ export function createWorkflow(toolNames) {
         permit("dramaclaw_assign_sketch_colors", ep.exists && ep.beats > 0);
         permit("dramaclaw_generate_sketches", ep.exists && ep.beats > 0 && ep.all_beats_have_content);
         const sketchesReady = ep.beats > 0 && ep.sketches_missing === 0 && ep.sketches_stale === 0;
+        const identitiesDetected = sketchesReady && ep.identity_detected === ep.beats;
+        const videoPromptsReady = ep.beats > 0 && ep.video_prompt_present === ep.beats;
+        const framesReady = ep.beats > 0 && ep.first_frames_present === ep.beats;
+        const audioReady = ep.beats > 0 && ep.audio_present === ep.beats;
+        const videoReady = ep.beats > 0 && ep.video_present === ep.beats;
         permit("dramaclaw_detect_sketch_identities", sketchesReady);
-        permit("dramaclaw_render_first_frames", sketchesReady && ep.identity_detected === ep.beats);
+        permit("dramaclaw_optimize_video_global", identitiesDetected);
+        permit("dramaclaw_render_first_frames", identitiesDetected && videoPromptsReady);
+        permit("dramaclaw_generate_audio", framesReady);
+        permit("dramaclaw_start_single_video", framesReady && audioReady);
+        permit("dramaclaw_compose_episode", framesReady && audioReady && videoReady);
+        permit("dramaclaw_get_final_video", ep.composed);
         if (active.size) reason = "await_task";
         else if (!source.imported && !source.uploads) reason = "source_missing";
         else if (!source.imported) [reason, next] = ["ingest_required", "dramaclaw_start_ingest"];
@@ -72,8 +95,12 @@ export function createWorkflow(toolNames) {
         else if (!ep.beats || !ep.all_beats_have_content) [reason, next] = ["script_required", "dramaclaw_generate_script"];
         else if (!sketchesReady) [reason, next] = ["sketches_required", "dramaclaw_generate_sketches"];
         else if (ep.identity_detected !== ep.beats) [reason, next] = ["identity_detection_required", "dramaclaw_detect_sketch_identities"];
-        else if (ep.first_frames_present !== ep.beats) [reason, next] = ["first_frames_required", "dramaclaw_render_first_frames"];
-        else reason = "review_first_frames";
+        else if (!videoPromptsReady) [reason, next] = ["global_optimize_required", "dramaclaw_optimize_video_global"];
+        else if (!framesReady) [reason, next] = ["first_frames_required", "dramaclaw_render_first_frames"];
+        else if (!audioReady) [reason, next] = ["audio_required", "dramaclaw_generate_audio"];
+        else if (!videoReady) [reason, next] = ["video_required", "dramaclaw_start_single_video"];
+        else if (!ep.composed) [reason, next] = ["compose_required", "dramaclaw_compose_episode"];
+        else [reason, next] = ["delivery", "dramaclaw_get_final_video"];
       }
       const tools = available.filter((name) => !STEPS.has(name) || allowed.has(name));
       if (next && !tools.includes(next)) return { tools, plan: null };
