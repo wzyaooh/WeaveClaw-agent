@@ -13,6 +13,23 @@ const initial = () => ({ version: 1, source: { uploads: 0, imported: false }, pr
 const observe = (workflow, data) => workflow.observe("weaveclaw_get_creation_progress", { episode: 1 },
   { ok: true, final: false, result: { ok: true, data } });
 
+test("resumed episode only suggests reading progress and fresh target facts take precedence", () => {
+  assert.equal(createWorkflow(names, null).plan().plan, null);
+  const workflow = createWorkflow(names, 7);
+  const fallback = { tools: [names[0], "read_other"], plan: {
+    episode: 7, next_tool: names[0], reason: "progress_required",
+  } };
+  assert.deepEqual(workflow.plan(), fallback);
+  assert.equal(workflow.allows("weaveclaw_generate_script", { episode: 7 }), false);
+  const data = initial();
+  data.episode.number = 8;
+  workflow.observe(names[0], { episode: 8 }, { ok: true, final: false, result: { ok: true, data } });
+  assert.equal(workflow.plan().plan.episode, 8);
+  workflow.observe(names[0], { episode: 8 }, { ok: false, final: false, result: { ok: false } });
+  assert.deepEqual(workflow.plan(), fallback);
+  assert.equal(createWorkflow(["read_other"], 7).plan().plan, null);
+});
+
 test("workflow hides pipeline writes until it receives valid target progress", () => {
   const workflow = createWorkflow(names);
   assert.deepEqual(workflow.plan(), { tools: [names[0], "read_other"], plan: null });

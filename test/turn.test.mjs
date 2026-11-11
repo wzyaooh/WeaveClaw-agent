@@ -24,6 +24,20 @@ function mockHost(replies) {
 const model = (...parts) => ({ kind: "model.call", value: { parts } });
 const result = (final = false) => ({ kind: "tool.call", value: { final, ok: true, result: { ok: true } } });
 
+test("turn accepts absent or null episode memory and rejects invalid episode values", async () => {
+  for (const extra of [{}, { last_episode: null }]) {
+    const host = mockHost([model()]);
+    const turn = createTurn({ scope: "project", prompt: "继续", history: [], tools: [tool], host, ...extra });
+    assert.ok(!turn.strategy.text.includes("当前正在处理第"));
+    assert.equal((await turn.run()).error, undefined);
+    assert.equal(host.requests[0].payload.plan, null);
+  }
+  for (const last_episode of ["7", 1.5, 0, -1, 10001, Number.MAX_SAFE_INTEGER + 1, {}, true]) {
+    assert.throws(() => createTurn({ scope: "project", prompt: "继续", history: [], tools: [],
+      host: mockHost([]), last_episode }), /invalid_turn_start/);
+  }
+});
+
 test("turn reads target progress before showing the eligible creative write", async () => {
   const episodeSchema = { type: "object", properties: { episode: { type: "integer" } }, required: ["episode"], additionalProperties: false };
   const progress = { ...tool, name: "weaveclaw_get_creation_progress", parameters: episodeSchema };

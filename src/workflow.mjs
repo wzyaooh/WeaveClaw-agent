@@ -46,7 +46,7 @@ function facts(result, episode) {
   };
 }
 
-export function createWorkflow(toolNames) {
+export function createWorkflow(toolNames, last_episode = null) {
   const available = [...toolNames];
   let progress = null;
   return {
@@ -104,6 +104,9 @@ export function createWorkflow(toolNames) {
         else [reason, next] = ["delivery", "weaveclaw_get_final_video"];
       }
       const tools = available.filter((name) => !STEPS.has(name) || allowed.has(name));
+      if (!progress && last_episode !== null && tools.includes("weaveclaw_get_creation_progress")) {
+        return { tools, plan: { episode: last_episode, next_tool: "weaveclaw_get_creation_progress", reason: "progress_required" } };
+      }
       if (next && !tools.includes(next)) return { tools, plan: null };
       return { tools, plan: reason ? { episode: progress.ep.number, next_tool: next, reason, ...(checkpoint ? { checkpoint: true } : {}) } : null };
     },

@@ -72,6 +72,30 @@ test("real local socket runs one verified write", { timeout: 10_000 }, async () 
   } finally { await p.close(); }
 });
 
+test("successive turns restore host episode memory without reusing progress", { timeout: 10_000 }, async () => {
+  const p = await pair();
+  const progress = { ...tool, name: "weaveclaw_get_creation_progress", parameters: {
+    type: "object", properties: { episode: { type: "integer" } }, required: ["episode"], additionalProperties: false,
+  } };
+  try {
+    for (const [index, last_episode] of [null, 7].entries()) {
+      const turn = `resume-${index}`;
+      p.send("turn.start", turn, `start-${index}`, {
+        prompt: "继续", history: [], scope: "project", tools: [progress], last_episode,
+      });
+      const accepted = await p.next();
+      const model = await p.next();
+      assert.equal(accepted.type, "turn.accept");
+      assert.equal(accepted.payload.strategy.text.includes("当前正在处理第7集"), last_episode !== null);
+      assert.deepEqual(model.payload.plan, last_episode === null ? null : {
+        episode: 7, next_tool: progress.name, reason: "progress_required",
+      });
+      p.send("model.result", turn, model.request_id, { parts: [] });
+      assert.equal((await p.next()).type, "turn.end");
+    }
+  } finally { await p.close(); }
+});
+
 test("host abort terminates an in-flight attempt without retry", { timeout: 10_000 }, async () => {
   const p = await pair();
   try {

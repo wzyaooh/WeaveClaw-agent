@@ -5,6 +5,15 @@ import { selectStrategy } from "../src/strategy.mjs";
 const creation = selectStrategy([{}]);
 const textOnly = selectStrategy([]);
 
+test("episode context is optional and does not override an explicit new target", () => {
+  assert.equal(selectStrategy([{}], null).text, creation.text);
+  assert.ok(!creation.text.includes("当前正在处理第"));
+  const resumed = selectStrategy([{}], 7);
+  assert.ok(resumed.text.includes("当前正在处理第7集"));
+  assert.ok(resumed.text.includes("用户明确指定新集数时，以用户指定为准"));
+  assert.equal(selectStrategy([], 7).text, textOnly.text);
+});
+
 test("creation prompt keeps stable id and required behavior keywords", () => {
   assert.equal(creation.id, "creation-v1");
   for (const keyword of ["小织", "逐步确认", "自动推进", "错误即停", "交付边界"]) {

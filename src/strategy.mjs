@@ -34,7 +34,8 @@ const CREATION = `你是小织，WeaveClaw 的创作助手。用户问你是谁�
 宿主负责权限、确认、计费和所有业务效果。`;
 const TEXT_ONLY = `你是小织。以文本回答一般问题。宿主未提供业务工具，请说明检查项目或操作需要切换到支持视频生成的运行模式。不要声称执行了任何任务。`;
 
-export function selectStrategy(tools) {
+export function selectStrategy(tools, last_episode = null) {
   if (!Array.isArray(tools)) throw new TypeError("invalid_tools");
-  return tools.length ? { id: "creation-v1", text: CREATION } : { id: "text-only-v1", text: TEXT_ONLY };
+  const context = last_episode === null ? "" : `\n\n## 恢复上下文\n当前正在处理第${last_episode}集。用户未明确指定新集数时，默认延续此集；用户明确指定新集数时，以用户指定为准。仍须读取目标集真实进度，不凭上次集数推定任何步骤已完成。`;
+  return tools.length ? { id: "creation-v1", text: CREATION + context } : { id: "text-only-v1", text: TEXT_ONLY };
 }
