@@ -1,0 +1,79 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import { selectStrategy } from "../src/strategy.mjs";
+
+const creation = selectStrategy([{}]);
+const textOnly = selectStrategy([]);
+
+test("creation prompt keeps stable id and required behavior keywords", () => {
+  assert.equal(creation.id, "creation-v1");
+  for (const keyword of ["小织", "逐步确认", "自动推进", "错误即停", "交付边界"]) {
+    assert.ok(creation.text.includes(keyword), `missing keyword: ${keyword}`);
+  }
+});
+
+test("identity rule answers only 我是小织 without titles", () => {
+  assert.ok(creation.text.includes("只简短回答"));
+  assert.ok(creation.text.includes("我是小织"));
+  assert.ok(creation.text.includes("不附加头衔或框架描述"));
+});
+
+test("big task entry splits work and asks before any write tool", () => {
+  assert.ok(creation.text.includes("大任务入口"));
+  assert.ok(creation.text.includes("第一轮不启动任何写工具"));
+  assert.ok(creation.text.includes("询问是否先列出当前进度和建议下一步"));
+});
+
+test("execution modes default to asking the user and cap one write per turn", () => {
+  assert.ok(creation.text.includes("默认先问用户选择"));
+  assert.ok(creation.text.includes("用户没说明时主动问一句"));
+  assert.ok(creation.text.includes("每轮最多一个写任务，启动后收口"));
+  assert.ok(creation.text.includes("不轮询到完成"));
+});
+
+test("audio update keeps fixed order across turns", () => {
+  const { text } = creation;
+  const patch = text.indexOf("先更新 beat 本身");
+  const redo = text.indexOf("重做该 beat 音频");
+  const compose = text.indexOf("触发合成");
+  assert.ok(patch >= 0 && redo > patch && compose > redo, "PATCH beat → 重做音频 → 合成 order broken");
+  assert.ok(text.includes("跨轮次"));
+  assert.ok(text.includes("不跳过第一步"));
+});
+
+test("write failure stops the turn without retry", () => {
+  assert.ok(creation.text.includes("错误即停"));
+  assert.ok(creation.text.includes("停止所有后续工具调用"));
+  assert.ok(creation.text.includes("不重试"));
+});
+
+test("each step delivers its own artifact via host display tools", () => {
+  assert.ok(creation.text.includes("每步完成后展示对应产物"));
+  assert.ok(creation.text.includes("草图→展示草图"));
+  assert.ok(creation.text.includes("音频→展示音频"));
+  assert.ok(creation.text.includes("媒体展示调用对应展示工具"));
+});
+
+test("grounding and delivery red lines stay pinned", () => {
+  assert.ok(creation.text.includes("不拼接 host"));
+  assert.ok(creation.text.includes("不捏造完成结果"));
+  assert.ok(creation.text.includes("不扩大交付范围"));
+});
+
+test("strategy texts satisfy host orchestrator contract", () => {
+  for (const strategy of [creation, textOnly]) {
+    assert.match(strategy.id, /^[a-z0-9][a-z0-9._-]{0,63}$/);
+    assert.ok(strategy.text.trim().length > 0);
+    assert.ok(strategy.text.length <= 8000);
+    assert.ok(![...strategy.text].some((char) => {
+      const code = char.codePointAt(0);
+      return (code >= 0xd800 && code <= 0xdfff) || (code < 32 && !"\n\r\t".includes(char));
+    }), "surrogate or control character in strategy text");
+  }
+});
+
+test("text-only strategy claims no task execution", () => {
+  assert.equal(textOnly.id, "text-only-v1");
+  assert.ok(textOnly.text.includes("小织"));
+  assert.ok(textOnly.text.includes("不要声称执行了任何任务"));
+});
