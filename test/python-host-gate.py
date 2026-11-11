@@ -341,6 +341,78 @@ async def main():
                 bind_strategy=bind_strategy, history=[{'role': 'user', 'content': 'previous user message'}]), 10)
         assert result.write_attempted and dispatcher.read_count == 2
         claim.assert_not_awaited(); request.assert_not_awaited()
+        # Exercise the host auto coordinator against the real Pi protocol with
+        # mock models and a task that changes from queued to completed.
+        from novelvideo.chat.creation_batch_auto import run_batch_auto
+        state = {'id': 'batch-auto', 'start': 1, 'end': 2, 'current': 1, 'last_turn': 'initial'}
+        receipts = {'initial': {'status': 'completed', 'tasks': []}}
+        auto_events, auto_requests, executions = [], [], []
+        polls = 0
+        async def auto_load(): return dict(state)
+        async def auto_refresh(turn):
+            nonlocal polls
+            receipt = receipts[turn]
+            if turn == 'child-1' and receipt['tasks'][0]['status'] == 'queued':
+                polls += 1
+                if polls == 2:
+                    auto_events.append('task_completed')
+                    receipt['tasks'][0]['status'] = 'completed'
+            return receipt
+        async def auto_notify(status, reason, batch_state, turns): auto_events.append(status)
+        class CompleteBatchModel(Model):
+            async def request(self, messages, settings, parameters):
+                self.calls += 1
+                if self.calls == 1:
+                    assert 'episode=2; reason=progress_required' in messages[0].parts[0].content
+                    return ModelResponse(parts=[ToolCallPart('weaveclaw_get_creation_progress', {'episode': 2}, 'done-read')], finish_reason='tool_call', model_name='mock')
+                return ModelResponse(parts=[TextPart('批次完成')], finish_reason='stop', model_name='mock')
+        async def auto_execute(batch_state, receipt, resume):
+            assert not resume
+            executions.append(batch_state['current'])
+            async def request_auto(method, path, *, query=None, body=None):
+                auto_requests.append((method, path, query))
+                if method == 'GET':
+                    number = query['episode']
+                    complete = number == 1 or len(executions) == 2
+                    if complete: state['current'] = number + 1
+                    return {'ok': True, 'data': batch_progress(number, complete)}
+                return {'ok': True, 'task_id': 'auto-mock-task'}
+            child = f'child-{len(executions)}'
+            state['last_turn'] = child
+            dispatcher_auto = BusinessToolDispatcher(project_id='fixture-project', request=request_auto, authorize=AsyncMock(), claim_write=AsyncMock(return_value=True))
+            model_auto = BatchModel('batch') if len(executions) == 1 else CompleteBatchModel('batch')
+            result_auto = await OrchestratorRuntime(link=app.state.orchestrator_link, model=model_auto,
+                dispatcher=dispatcher_auto, stream=False).run('继续批量', scope='project',
+                    batch={'start': 1, 'end': 2, 'current': batch_state['current'], 'allow_write': True},
+                    bind_strategy=bind_strategy, history=[{'role': 'user', 'content': 'previous user message'}])
+            receipts[child] = {'status': 'completed', 'tasks': ([{'status': 'queued'}] if result_auto.write_attempted else []),
+                'operation': ({'state': 'accepted'} if result_auto.write_attempted else None)}
+        outcome = await asyncio.wait_for(run_batch_auto(batch_id='batch-auto', load=auto_load, refresh=auto_refresh,
+            execute=auto_execute, notify=auto_notify, interval=0.001), 10)
+        assert outcome.state == 'completed' and executions == [1, 2]
+        assert auto_events.index('waiting') < auto_events.index('task_completed') < len(auto_events) - 1
+        assert [item[0] for item in auto_requests] == ['GET', 'GET', 'POST', 'GET']
+        recovery_state = {'id': 'recovery', 'start': 1, 'end': 2, 'current': 1, 'last_turn': 'interrupted'}
+        recovery_receipt = {'status': 'cancelled', 'version': 3, 'continuation': 'resume',
+                            'operation': {'state': 'accepted'}, 'tasks': [{'status': 'queued'}]}
+        recovery_calls = []
+        async def recovery_load(): return dict(recovery_state)
+        async def recovery_refresh(turn): return recovery_receipt
+        async def recovery_execute(batch_state, receipt, resume):
+            assert resume and batch_state['last_turn'] == 'interrupted'
+            recovery_calls.append(batch_state['last_turn'])
+            no_new_request, no_new_claim = AsyncMock(), AsyncMock()
+            recovery_dispatcher = BusinessToolDispatcher(project_id='fixture-project', request=no_new_request,
+                authorize=AsyncMock(), claim_write=no_new_claim, replay_write=AsyncMock(return_value={'ok': True, 'task_id': 'mock-task'}))
+            await OrchestratorRuntime(link=app.state.orchestrator_link, model=BatchModel('batch'),
+                dispatcher=recovery_dispatcher, stream=False, replay_read=batch_replay).run('继续批量', scope='project',
+                    batch=batch, bind_strategy=bind_strategy, history=[{'role': 'user', 'content': 'previous user message'}])
+            no_new_claim.assert_not_awaited(); no_new_request.assert_not_awaited()
+            recovery_state['current'] = 2
+            recovery_receipt.update(status='unknown', operation={'state': 'unknown'})
+        recovery_outcome = await asyncio.wait_for(run_batch_auto(batch_id='recovery', load=recovery_load,
+            refresh=recovery_refresh, execute=recovery_execute, notify=auto_notify, interval=0.001), 10)
+        assert recovery_calls == ['interrupted'] and recovery_outcome.reason == 'receipt_attention'
         class RepairModel(Model):
             def __init__(self, *, valid=False, still_invalid=False):
                 super().__init__('repair')
