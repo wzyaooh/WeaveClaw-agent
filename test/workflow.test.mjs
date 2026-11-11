@@ -13,6 +13,36 @@ const initial = () => ({ version: 1, source: { uploads: 0, imported: false }, pr
 const observe = (workflow, data) => workflow.observe("weaveclaw_get_creation_progress", { episode: 1 },
   { ok: true, final: false, result: { ok: true, data } });
 
+test("跳过音频时 allows 拒绝合成和逐 beat 视频", () => {
+  const workflow = createWorkflow(names), data = initial();
+  for (const audio_present of [undefined, 0]) {
+    if (audio_present === undefined) delete data.episode.audio_present;
+    else data.episode.audio_present = audio_present;
+    observe(workflow, data);
+    assert.equal(workflow.allows("weaveclaw_compose_episode", { episode: 1 }), false);
+    assert.equal(workflow.allows("weaveclaw_start_single_video", { episode: 1 }), false);
+  }
+});
+
+test("音频进度出现后 allows 允许目标集的视频和合成", () => {
+  const workflow = createWorkflow(names), data = initial();
+  data.episode.beats = 2;
+  observe(workflow, data);
+  assert.equal(workflow.allows("weaveclaw_compose_episode", { episode: 1 }), false);
+  data.episode.audio_present = 1;
+  observe(workflow, data);
+  for (const name of ["weaveclaw_compose_episode", "weaveclaw_start_single_video"]) {
+    assert.equal(workflow.allows(name, { episode: 1 }), true);
+    assert.equal(workflow.allows(name, { episode: 2 }), false);
+  }
+  data.episode.audio_present = 2;
+  observe(workflow, data);
+  assert.equal(workflow.allows("weaveclaw_compose_episode", { episode: 1 }), true);
+  data.episode.audio_present = 0;
+  observe(workflow, data);
+  assert.equal(workflow.allows("weaveclaw_compose_episode", { episode: 1 }), false);
+});
+
 test("resumed episode only suggests reading progress and fresh target facts take precedence", () => {
   assert.equal(createWorkflow(names, null).plan().plan, null);
   const workflow = createWorkflow(names, 7);
