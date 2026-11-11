@@ -53,6 +53,8 @@ class Model:
             assert 'weaveclaw_generate_audio' not in {item.name for item in parameters.function_tools}
         if self.expected_reason in ('audio_stale', 'audio_unknown'):
             assert not {'weaveclaw_start_single_video', 'weaveclaw_compose_episode', 'weaveclaw_get_final_video'} & {item.name for item in parameters.function_tools}
+        if self.expected_reason in ('quality_retry', 'quality_failed'):
+            assert not {'weaveclaw_generate_audio', 'weaveclaw_start_single_video', 'weaveclaw_compose_episode'} & {item.name for item in parameters.function_tools}
         assert any(isinstance(part, ToolReturnPart) and part.content['data']['episode']['number'] == 2
                    for message in messages for part in message.parts)
         actual = next(part.content['data'] for message in messages for part in message.parts
@@ -93,10 +95,10 @@ class Dispatcher:
                 data['source']['ingest'] = 'completed'
             elif self.scenario == 'sketches_stale':
                 data['episode'].update(beats=1, all_beats_have_content=True, sketches_stale=1)
-            elif self.scenario == 'quality_retry':
+            elif self.scenario in ('quality_retry', 'quality_failed'):
                 data['episode'].update(beats=1, all_beats_have_content=True, identity_detected=1,
                                        video_prompt_present=1, first_frames_present=1,
-                                       first_frames_quality=False, retry_count=0)
+                                       first_frames_quality=False, retry_count=0 if self.scenario == 'quality_retry' else 1)
             return {'ok': True, 'data': data}
         self.write_attempted = True
         return {'ok': True, 'result': 'verified'}
@@ -136,6 +138,12 @@ class Dispatcher:
             files.append(paths.audio(1))
         for path in files:
             path.parent.mkdir(parents=True, exist_ok=True); path.write_bytes(b'fixture')
+        if stage == 'quality_failed':
+            from novelvideo.verification.workbench import ReviewRequest, new_run, run_dir, update_report
+            report = new_run(output, 2, beats, {}, ReviewRequest(operation='frame'))
+            update_report(run_dir(output, 2, report['run_id']), status='completed', results=[
+                {'beat_number': 1, 'status': 'failed', 'data': {'passed': False}},
+                {'beat_number': 2, 'status': 'passed', 'data': {'passed': True}}])
         if stage == 'await_task':
             with closing(sqlite3.connect(state / 'data.db')) as db:
                 db.execute('CREATE TABLE task_states(project_id TEXT, task_type TEXT, episode INTEGER, status TEXT, expires_at TEXT, updated_at TEXT)')
@@ -189,6 +197,7 @@ class Dispatcher:
         fixture = self
         class Store:
             def get_all_characters(self): return [object()]
+            def get_sketch_colors(self, number): return {}
             def get_all_episodes(self): return [episode] if self.get_episode(2) else []
             def get_episode(self, number):
                 if number != 2: return None
@@ -247,10 +256,10 @@ async def main():
                 if not line:
                     raise RuntimeError('test process failed to start')
         temp = tempfile.TemporaryDirectory()
-        for scenario in ('script_required', 'config_recommendation', 'sketches_stale', 'quality_retry',
+        for scenario in ('script_required', 'config_recommendation', 'sketches_stale', 'quality_retry', 'quality_failed',
                          'real_global_optimize_required', 'real_first_frames_required', 'real_audio_required',
                          'real_audio_unknown', 'real_audio_stale', 'real_audio_accepted', 'real_audio_rejected',
-                         'real_audio_changed', 'real_await_task'):
+                         'real_audio_changed', 'real_await_task', 'real_quality_failed'):
             expected = {'real_audio_accepted': 'video_required', 'real_audio_rejected': 'audio_unknown',
                         'real_audio_changed': 'audio_unknown'}.get(scenario, scenario.removeprefix('real_'))
             dispatcher, model = Dispatcher(scenario, Path(temp.name)), Model(expected)
@@ -280,6 +289,23 @@ async def main():
                 if scenario == 'real_audio_stale':
                     assert snapshot['progress']['step'] == 10 and snapshot['progress']['skipped'][-1] == 'first_frames'
                     assert snapshot['progress']['artifacts']['audio_stale'] == 1
+                if scenario == 'real_quality_failed':
+                    assert snapshot['progress']['step'] == 9
+        fixture = Dispatcher('real_quality_failed', Path(temp.name) / 'quality-recovery')
+        saved_quality = {'ok': True, 'data': await fixture.real_progress()}
+        async def replay_quality(_model_id, tool_id, name, args):
+            assert name == 'weaveclaw_get_creation_progress' and args == {'episode': 2}
+            return {'read_cost': 1, 'result': saved_quality}
+        from novelvideo.chat.business_tools import BusinessToolDispatcher
+        no_request, no_claim = AsyncMock(), AsyncMock()
+        recovery_dispatcher = BusinessToolDispatcher(project_id='fixture-project', request=no_request,
+            authorize=AsyncMock(), claim_write=no_claim)
+        recovery_model = Model('quality_failed', resumed=True)
+        recovery = await asyncio.wait_for(OrchestratorRuntime(link=app.state.orchestrator_link, model=recovery_model,
+            dispatcher=recovery_dispatcher, stream=False, replay_read=replay_quality).run('private prompt', scope='project',
+                bind_strategy=bind_strategy, last_episode=2, history=[{'role': 'user', 'content': 'previous user message'}]), 10)
+        no_request.assert_not_awaited(); no_claim.assert_not_awaited()
+        assert not recovery.write_attempted and recovery_model.calls == 2
         for tool in ('weaveclaw_plan_scenes', 'weaveclaw_plan_props'):
             dispatcher = Dispatcher('real_global_optimize_required', Path(temp.name) / tool)
             model = Model('global_optimize_required', write_tool=tool)

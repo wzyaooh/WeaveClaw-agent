@@ -41,7 +41,7 @@ function completion(progress) {
       ep.identity_planned, beatsReady && ep.all_beats_have_content,
       sketchesReady, sketchesReady, beatsReady && ep.identity_detected === ep.beats,
       beatsReady && ep.video_prompt_present === ep.beats,
-      beatsReady && ep.first_frames_present === ep.beats,
+      beatsReady && ep.first_frames_present === ep.beats && ep.first_frames_quality !== false,
       beatsReady && ep.audio_current !== null && ep.audio_current + ep.audio_confirmed === ep.beats,
       beatsReady && ep.video_current !== null && ep.video_current + ep.video_confirmed === ep.beats,
       ep.composed_freshness === "current" || ep.composition_confirmed,
@@ -221,10 +221,10 @@ export function createWorkflow(toolNames, last_episode = null, batch = null, sco
         permit("weaveclaw_detect_sketch_identities", sketchesReady);
         permit("weaveclaw_optimize_video_global", identitiesDetected);
         permit("weaveclaw_render_first_frames", identitiesDetected && videoPromptsReady);
-        permit("weaveclaw_generate_audio", framesReady);
-        permit("weaveclaw_start_single_video", framesReady && audioReady);
-        permit("weaveclaw_compose_episode", framesReady && audioReady && videoReady);
-        permit("weaveclaw_get_final_video", audioReady && videoReady && (ep.composed_freshness === "current" || ep.composition_confirmed));
+        permit("weaveclaw_generate_audio", framesReady && ep.first_frames_quality !== false);
+        permit("weaveclaw_start_single_video", framesReady && ep.first_frames_quality !== false && audioReady);
+        permit("weaveclaw_compose_episode", framesReady && ep.first_frames_quality !== false && audioReady && videoReady);
+        permit("weaveclaw_get_final_video", ep.first_frames_quality !== false && audioReady && videoReady && (ep.composed_freshness === "current" || ep.composition_confirmed));
         // Resume from the first missing prerequisite in fresh facts, not from
         // a session-local cursor; completed stages must not be suggested again.
         if (last_episode === ep.number && !ep.exists) [reason, checkpoint] = ["episode_missing", true];
@@ -248,9 +248,9 @@ export function createWorkflow(toolNames, last_episode = null, batch = null, sco
          else if (!framesReady) [reason, next] = ["first_frames_required", "weaveclaw_render_first_frames"];
          // The host owns the retry counter; repeated planning cannot spend it.
          else if (ep.first_frames_quality === false && ep.retry_count === 0) [reason, next, checkpoint] = ["quality_retry", "weaveclaw_render_first_frames", true];
+         else if (ep.first_frames_quality === false) [reason, checkpoint] = ["quality_failed", true];
          else if (ep.audio_current === null || ep.audio_unknown > ep.audio_confirmed) [reason, checkpoint] = ["audio_unknown", true];
          else if (ep.audio_stale > 0) [reason, checkpoint] = ["audio_stale", true];
-         else if (!audioReady && ep.first_frames_quality === false && ep.retry_count >= 1) [reason, next] = ["audio_required", "weaveclaw_generate_audio"];
         else if (!audioReady && ep.audio_current > 0) [reason, next] = ["audio_required", "weaveclaw_generate_audio"];
         else if (!audioReady) [reason, checkpoint] = ["review_first_frames", true];
         else if (ep.video_current === null || ep.video_unknown > ep.video_confirmed) [reason, checkpoint] = ["video_unknown", true];

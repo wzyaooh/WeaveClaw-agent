@@ -74,19 +74,19 @@ test("首帧质量不达标且未重试时建议重渲，重复规划不消耗�
   data.episode.retry_count = 1;
   assert.deepEqual(workflow.plan(), proposal);
   observe(workflow, data);
-  assert.equal(workflow.plan().plan.reason, "audio_required");
+  assert.equal(workflow.plan().plan.reason, "quality_failed");
 });
 
-test("首帧重试耗尽后跳过审查继续音频和视频流水线", () => {
+test("首帧重试耗尽后暂停音频和视频流水线", () => {
   for (const retry_count of [1, 2]) {
     const workflow = createWorkflow(names), data = qualityProgress();
     Object.assign(data.episode, { first_frames_quality: false, retry_count });
     for (const audio_present of [0, 1, 2]) {
       data.episode.audio_present = audio_present;
       observe(workflow, data);
-      assert.deepEqual(workflow.plan().plan, audio_present < 2
-        ? { episode: 1, next_tool: "weaveclaw_generate_audio", reason: "audio_required" }
-        : { episode: 1, next_tool: "weaveclaw_start_single_video", reason: "video_required" });
+      assert.deepEqual(workflow.plan().plan, { episode: 1, next_tool: null, reason: "quality_failed", checkpoint: true });
+      assert.ok(!workflow.plan().tools.includes("weaveclaw_generate_audio"));
+      assert.ok(!workflow.plan().tools.includes("weaveclaw_start_single_video"));
     }
   }
 });
