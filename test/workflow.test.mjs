@@ -111,6 +111,69 @@ test("重连读取目标集后从首个未完成步骤续接，不依赖本轮�
   }
 });
 
+test("手动完成当前步骤后刷新进度，plan 跳过该步骤", () => {
+  const workflow = createWorkflow(names), data = initial();
+  data.source.uploads = 1;
+  observe(workflow, data);
+  assert.equal(workflow.plan().plan.next_tool, "weaveclaw_start_ingest");
+
+  // Completion is reported only by fresh facts, without observing a write receipt.
+  data.source.imported = true;
+  observe(workflow, data);
+  assert.deepEqual(workflow.plan().plan, {
+    episode: 1, next_tool: "weaveclaw_build_characters", reason: "characters_required",
+  });
+});
+
+test("同一会话中多个步骤由用户完成，plan 直接跳到首个未完成步骤", () => {
+  const workflow = createWorkflow(names), data = initial();
+  data.source.imported = true;
+  observe(workflow, data);
+  assert.equal(workflow.plan().plan.next_tool, "weaveclaw_build_characters");
+
+  Object.assign(data.project, { characters: 2, episodes: 1 });
+  Object.assign(data.episode, {
+    exists: true, identity_planned: true, beats: 3, all_beats_have_content: true,
+    sketches_missing: 0, identity_detected: 3, video_prompt_present: 3,
+    first_frames_present: 3, audio_present: 3, video_present: 1,
+  });
+  // Mutating an external response cannot advance the plan before a fresh read.
+  assert.equal(workflow.plan().plan.next_tool, "weaveclaw_build_characters");
+  observe(workflow, data);
+  const proposal = workflow.plan();
+  assert.deepEqual(proposal.plan, {
+    episode: 1, next_tool: "weaveclaw_start_single_video", reason: "video_required",
+  });
+  assert.ok(proposal.tools.includes(proposal.plan.next_tool));
+
+  // Later completed stages must not hide a newly incomplete prerequisite.
+  data.episode.video_prompt_present = 2;
+  observe(workflow, data);
+  assert.equal(workflow.plan().plan.next_tool, "weaveclaw_optimize_video_global");
+});
+
+test("刷新发现所有步骤均已完成时 plan 返回 delivery", () => {
+  const workflow = createWorkflow(names), data = initial();
+  data.source.uploads = 1;
+  observe(workflow, data);
+  assert.equal(workflow.plan().plan.next_tool, "weaveclaw_start_ingest");
+
+  data.source.imported = true;
+  Object.assign(data.project, { characters: 2, episodes: 1 });
+  Object.assign(data.episode, {
+    exists: true, identity_planned: true, beats: 3, all_beats_have_content: true,
+    sketches_missing: 0, identity_detected: 3, video_prompt_present: 3,
+    first_frames_present: 3, audio_present: 3, video_present: 3, composed: true,
+  });
+  observe(workflow, data);
+  const proposal = workflow.plan();
+  assert.deepEqual(proposal.plan, {
+    episode: 1, next_tool: "weaveclaw_get_final_video", reason: "delivery",
+  });
+  assert.ok(proposal.tools.includes(proposal.plan.next_tool));
+  assert.deepEqual(workflow.plan(), proposal);
+});
+
 test("恢复时已有任务只等待，进度刷新失败则重新读取而不沿用旧断点", () => {
   const workflow = createWorkflow(names, 1), data = initial();
   Object.assign(data, { source: { uploads: 1, imported: true }, project: { characters: 2, episodes: 1 } });
