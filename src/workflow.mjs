@@ -97,6 +97,9 @@ export function createWorkflow(toolNames, last_episode = null) {
         else if (!ep.exists) reason = null;
         else if (!ep.identity_planned) [reason, next] = ["identity_plan_required", "weaveclaw_plan_identities"];
         else if (!ep.beats || !ep.all_beats_have_content) [reason, next] = ["script_required", "weaveclaw_generate_script"];
+        // Optional warning: old sketch batches may have inconsistent clothing.
+        // Keep existing tool gates intact; regeneration remains available.
+        else if (ep.sketches_stale > 0) [reason, checkpoint] = ["sketches_stale", true];
         else if (!sketchesReady) [reason, next] = ["sketches_required", "weaveclaw_generate_sketches"];
         else if (ep.identity_detected !== ep.beats) [reason, next] = ["identity_detection_required", "weaveclaw_detect_sketch_identities"];
         else if (!videoPromptsReady) [reason, next] = ["global_optimize_required", "weaveclaw_optimize_video_global"];

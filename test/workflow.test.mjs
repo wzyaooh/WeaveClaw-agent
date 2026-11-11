@@ -115,6 +115,33 @@ test("workflow suggests stages and exposes writes only after prerequisites", () 
   assert.equal(workflow.plan().tools.includes("weaveclaw_generate_sketches"), false);
 });
 
+test("草图旧批次产生可选警告且不新增工具阻断，新批次恢复正常建议", () => {
+  const workflow = createWorkflow(names), data = initial();
+  Object.assign(data, { source: { uploads: 1, imported: true }, project: { characters: 1, episodes: 1 } });
+  Object.assign(data.episode, {
+    exists: true, identity_planned: true, beats: 2, all_beats_have_content: true,
+    sketches_stale: 1, identity_detected: 2, video_prompt_present: 2,
+    first_frames_present: 2, audio_present: 2,
+  });
+  observe(workflow, data);
+  const proposal = workflow.plan();
+  assert.deepEqual(proposal.plan, { episode: 1, next_tool: null, reason: "sketches_stale", checkpoint: true });
+  assert.deepEqual(workflow.plan(), proposal);
+  for (const name of ["weaveclaw_generate_sketches", "weaveclaw_generate_audio", "weaveclaw_start_single_video"]) {
+    assert.ok(proposal.tools.includes(name));
+    assert.equal(workflow.allows(name, { episode: 1 }), true);
+  }
+  // Existing stale gates remain unchanged, as do active-task priorities.
+  assert.equal(proposal.tools.includes("weaveclaw_render_first_frames"), false);
+  data.active_steps = ["sketches"]; observe(workflow, data);
+  assert.equal(workflow.plan().plan.reason, "await_task");
+  data.active_steps = []; data.episode.sketches_stale = 0; observe(workflow, data);
+  assert.deepEqual(workflow.plan().plan, { episode: 1, next_tool: "weaveclaw_start_single_video", reason: "video_required" });
+  assert.ok(workflow.plan().tools.includes("weaveclaw_render_first_frames"));
+  data.episode.sketches_missing = 1; observe(workflow, data);
+  assert.deepEqual(workflow.plan().plan, { episode: 1, next_tool: "weaveclaw_generate_sketches", reason: "sketches_required" });
+});
+
 test("invalid or failed progress cannot unlock writes or inject plan text", () => {
   const workflow = createWorkflow(names), data = initial();
   data.source.imported = "yes";
