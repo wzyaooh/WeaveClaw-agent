@@ -9,7 +9,8 @@ const names = ["weaveclaw_get_creation_progress", "weaveclaw_start_ingest", "wea
   "weaveclaw_start_single_video", "weaveclaw_compose_episode", "weaveclaw_get_final_video", "read_other"];
 const initial = () => ({ version: 1, source: { uploads: 0, imported: false }, project: { characters: 0, episodes: 0, configured: true },
   episode: { number: 1, exists: false, identity_planned: false, beats: 0, all_beats_have_content: false,
-    sketches_missing: 0, sketches_stale: 0, identity_detected: 0, first_frames_present: 0 }, active_steps: [] });
+    sketches_missing: 0, sketches_stale: 0, identity_detected: 0, first_frames_present: 0,
+    video_prompt_present: 0, audio_present: 0, video_present: 0, composed: false }, active_steps: [] });
 const observe = (workflow, data) => workflow.observe("weaveclaw_get_creation_progress", { episode: 1 },
   { ok: true, final: false, result: { ok: true, data } });
 
@@ -71,6 +72,7 @@ test("首帧质量达标或字段缺失时保持原有可选检查点", () => {
 test("质量重试不覆盖执行中或缺失首帧的前置建议", () => {
   const workflow = createWorkflow(names), data = qualityProgress();
   data.episode.first_frames_quality = false;
+  data.episode.retry_count = 0;
   observe(workflow, data);
   assert.equal(workflow.plan().plan.reason, "quality_retry");
   data.active_steps = ["first_frames"];
@@ -94,6 +96,15 @@ test("首帧质量与重试次数非法值使事实失效", () => {
       assert.equal(workflow.plan().plan, null);
       assert.deepEqual(workflow.plan().tools, [names[0], "read_other"]);
     }
+  }
+});
+
+test("质量或重试次数未知时不建议质量重做", () => {
+  for (const fields of [{ first_frames_quality: false }, { retry_count: 0 }]) {
+    const workflow = createWorkflow(names), data = qualityProgress();
+    Object.assign(data.episode, fields);
+    observe(workflow, data);
+    assert.notEqual(workflow.plan().plan.reason, "quality_retry");
   }
 });
 
@@ -398,7 +409,7 @@ test("跳过音频时 allows 拒绝合成和逐 beat 视频", () => {
   }
 });
 
-test("音频进度出现后 allows 允许目标集的视频和合成", () => {
+test("音频全部就绪后 allows 才允许目标集的视频和合成", () => {
   const workflow = createWorkflow(names), data = initial();
   data.episode.beats = 2;
   observe(workflow, data);
@@ -406,7 +417,7 @@ test("音频进度出现后 allows 允许目标集的视频和合成", () => {
   data.episode.audio_present = 1;
   observe(workflow, data);
   for (const name of ["weaveclaw_compose_episode", "weaveclaw_start_single_video"]) {
-    assert.equal(workflow.allows(name, { episode: 1 }), true);
+    assert.equal(workflow.allows(name, { episode: 1 }), false);
     assert.equal(workflow.allows(name, { episode: 2 }), false);
   }
   data.episode.audio_present = 2;
@@ -699,23 +710,14 @@ test("second-half pipeline gates audio, video and compose behind prior stages", 
   assert.ok(workflow.plan().tools.includes("weaveclaw_get_final_video"));
 });
 
-test("new fields are optional and default to 0 when absent from progress response", () => {
+test("missing post-production facts do not invent a next step", () => {
   const workflow = createWorkflow(names), data = initial();
-  Object.assign(data, {
-    source: { uploads: 1, imported: true },
-    project: { characters: 1, episodes: 1, configured: true },
-  });
-  Object.assign(data.episode, {
-    exists: true, identity_planned: true, beats: 2, all_beats_have_content: true,
-    sketches_missing: 0, sketches_stale: 0, identity_detected: 2, first_frames_present: 0,
-    // video_prompt_present / audio_present / video_present / composed intentionally omitted
-  });
+  Object.assign(data, { source: { uploads: 1, imported: true }, project: { characters: 1, episodes: 1, configured: true } });
+  Object.assign(data.episode, { exists: true, identity_planned: true, beats: 2, all_beats_have_content: true, identity_detected: 2 });
+  delete data.episode.video_prompt_present;
   observe(workflow, data);
-  // Without video_prompt_present, global_optimize is the next suggested step.
-  assert.equal(workflow.plan().plan.reason, "global_optimize_required");
-  assert.ok(workflow.plan().tools.includes("weaveclaw_optimize_video_global"));
-  // Audio and downstream tools remain hidden.
-  assert.equal(workflow.plan().tools.includes("weaveclaw_generate_audio"), false);
+  assert.equal(workflow.plan().plan, null);
+  assert.equal(workflow.plan().tools.includes("weaveclaw_render_first_frames"), false);
 });
 
 test("out-of-range new fields in progress response are rejected", () => {
@@ -795,28 +797,27 @@ test("后半程 reason 节点按链路顺序依次出现", () => {
   data.episode.composed = true; expect("delivery", "weaveclaw_get_final_video");
 });
 
-test("新字段缺省时默认为 0 或 false 并照常参与门槛计算", () => {
-  const workflow = createWorkflow(names), data = initial();
-  Object.assign(data, { source: { uploads: 1, imported: true }, project: { characters: 1, episodes: 1, configured: true } });
-  Object.assign(data.episode, {
-    exists: true, identity_planned: true, beats: 2, all_beats_have_content: true,
-    sketches_missing: 0, sketches_stale: 0, identity_detected: 2,
-  });
-  // video_prompt_present 缺省 → 按 0 计算：视频优化未就绪
-  observe(workflow, data);
-  assert.equal(workflow.plan().plan.reason, "global_optimize_required");
-  // audio_present 缺省 → 按 0 计算：首帧就绪后停在可选检查点
-  data.episode.video_prompt_present = 2; data.episode.first_frames_present = 2;
-  observe(workflow, data);
-  assert.equal(workflow.plan().plan.reason, "review_first_frames");
-  // video_present 缺省 → 按 0 计算：音频就绪后仍需逐 beat 视频
-  data.episode.audio_present = 2;
+test("缺失下游事实不会推断完成或缺失", () => {
+  const workflow = createWorkflow(names), data = qualityProgress();
+  data.episode.audio_present = 2; data.episode.video_present = 2;
+  for (const field of ["video_prompt_present", "audio_present", "video_present", "composed"]) {
+    const saved = data.episode[field];
+    delete data.episode[field];
+    observe(workflow, data);
+    assert.equal(workflow.plan().plan, null, field);
+    data.episode[field] = saved;
+  }
+});
+
+test("静音镜头计入音频就绪但不伪造音频文件", () => {
+  const workflow = createWorkflow(names), data = qualityProgress();
+  Object.assign(data.episode, { audio_present: 1, audio_ready: 2 });
   observe(workflow, data);
   assert.equal(workflow.plan().plan.reason, "video_required");
-  // composed 缺省 → 按 false 计算：视频就绪后仍未进入 delivery
-  data.episode.video_present = 2;
+  assert.equal(workflow.allows("weaveclaw_start_single_video", { episode: 1 }), true);
+  data.episode.audio_ready = 0;
   observe(workflow, data);
-  assert.equal(workflow.plan().plan.reason, "compose_required");
+  assert.equal(workflow.plan().plan, null);
 });
 
 test("新字段边界值 0 与等于 beats 均可通过校验", () => {

@@ -3,7 +3,10 @@ import json
 import os
 import socket
 import shutil
+import sqlite3
+import tempfile
 from pathlib import Path
+from contextlib import closing
 from types import SimpleNamespace
 
 import uvicorn
@@ -14,6 +17,9 @@ from novelvideo.api.routes.desktop_orchestrator import router
 from novelvideo.chat.orchestrator_link import OrchestratorLink
 from novelvideo.chat.orchestrator_runtime import OrchestratorRuntime
 from novelvideo.chat.business_tools import TOOL_SPECS
+from novelvideo.models import NO_CHARACTER_MARKER
+from novelvideo.services.creation_progress import creation_progress
+from novelvideo.utils.path_resolver import PathResolver
 
 ELECTRON = os.environ.get('WEAVECLAW_TEST_ELECTRON')
 NODE = ELECTRON or os.environ.get('WEAVECLAW_TEST_NODE') or shutil.which('node')
@@ -35,6 +41,8 @@ class Model:
                                  finish_reason='tool_call', model_name='mock')
         assert 'weaveclaw_generate_script' in {item.name for item in parameters.function_tools}
         assert f'reason={self.expected_reason}' in messages[0].parts[0].content
+        if self.expected_reason == 'await_task':
+            assert 'weaveclaw_generate_audio' not in {item.name for item in parameters.function_tools}
         assert any(isinstance(part, ToolReturnPart) and part.content['data']['episode']['number'] == 2
                    for message in messages for part in message.parts)
         if self.expected_reason != 'script_required':
@@ -43,7 +51,7 @@ class Model:
                              finish_reason='tool_call', model_name='mock')
 
 class Dispatcher:
-    def __init__(self, scenario): self.write_attempted = False; self.calls = []; self.scenario = scenario
+    def __init__(self, scenario, root): self.write_attempted = False; self.calls = []; self.scenario = scenario; self.root = root
     def definitions(self):
         real_tools = [SimpleNamespace(name=spec.name, description=spec.description, parameters_json_schema=spec.schema)
                       for spec in TOOL_SPECS.values()]
@@ -54,6 +62,8 @@ class Dispatcher:
     async def dispatch(self, name, args):
         self.calls.append((name, args))
         if name == 'weaveclaw_get_creation_progress':
+            if self.scenario.startswith('real_'):
+                return {'ok': True, 'data': await self.real_progress()}
             data = {'version': 1, 'source': {'uploads': 1, 'imported': True},
                 'project': {'characters': 1, 'episodes': 1},
                 'episode': {'number': 2, 'exists': True, 'identity_planned': True, 'beats': 0,
@@ -70,6 +80,41 @@ class Dispatcher:
             return {'ok': True, 'data': data}
         self.write_attempted = True
         return {'ok': True, 'result': 'verified'}
+
+    async def real_progress(self):
+        output = self.root / self.scenario / 'output'
+        state = self.root / self.scenario / 'state'
+        output.mkdir(parents=True, exist_ok=True); state.mkdir(parents=True, exist_ok=True)
+        (output / 'novel.txt').write_text('fixture', encoding='utf-8')
+        stage = self.scenario.removeprefix('real_')
+        beats = [{'beat_number': n, 'narration_segment': 'fixture', 'detected_identities': [NO_CHARACTER_MARKER],
+                  'audio_type': 'silence' if n == 2 else 'narration',
+                  'video_mode': 'i2v' if stage != 'global_optimize_required' else '',
+                  'video_prompt': 'fixture' if stage != 'global_optimize_required' else ''} for n in (1, 2)]
+        paths = PathResolver(str(output), 2)
+        files = [paths.sketch(n) for n in (1, 2)]
+        if stage not in ('global_optimize_required', 'first_frames_required'):
+            files += [paths.frame(n) for n in (1, 2)]
+        if stage in ('video_required', 'compose_required', 'delivery'):
+            files.append(paths.audio(1))
+        if stage in ('compose_required', 'delivery'):
+            files += [paths.video(n) for n in (1, 2)]
+        if stage == 'delivery': files.append(paths.final_video())
+        for path in files:
+            path.parent.mkdir(parents=True, exist_ok=True); path.write_bytes(b'fixture')
+        if stage == 'await_task':
+            with closing(sqlite3.connect(state / 'data.db')) as db:
+                db.execute('CREATE TABLE task_states(project_id TEXT, task_type TEXT, episode INTEGER, status TEXT, expires_at TEXT, updated_at TEXT)')
+                db.execute('INSERT INTO task_states VALUES(?,?,?,?,?,?)', ('fixture-project', 'audio_generation_indextts2', 2, 'running', None, '2026-11-11'))
+                db.commit()
+        episode = SimpleNamespace(identity_ids=['fixture'])
+        class Store:
+            def get_all_characters(self): return [object()]
+            def get_all_episodes(self): return [episode]
+            def get_episode(self, number): return episode if number == 2 else None
+            async def get_beats_as_dicts(self, number): return beats
+        ctx = SimpleNamespace(project_id='fixture-project', output_dir=output, state_dir=state)
+        return await creation_progress(ctx, Store(), 2)
 
 async def main():
     sock = socket.socket(); sock.bind(('127.0.0.1', 0)); sock.listen(100); sock.setblocking(False)
@@ -103,8 +148,12 @@ async def main():
                     break
                 if not line:
                     raise RuntimeError('test process failed to start')
-        for scenario in ('script_required', 'config_recommendation', 'sketches_stale', 'quality_retry'):
-            dispatcher, model = Dispatcher(scenario), Model(scenario)
+        temp = tempfile.TemporaryDirectory()
+        for scenario in ('script_required', 'config_recommendation', 'sketches_stale', 'quality_retry',
+                         'real_global_optimize_required', 'real_first_frames_required', 'real_audio_required',
+                         'real_video_required', 'real_compose_required', 'real_delivery', 'real_await_task'):
+            expected = scenario.removeprefix('real_')
+            dispatcher, model = Dispatcher(scenario, Path(temp.name)), Model(expected)
             bindings = []
             async def bind_strategy(digest):
                 bindings.append(digest)
@@ -117,7 +166,8 @@ async def main():
             assert len(bindings) == 1 and len(bindings[0]) == 64
             assert result.write_attempted == (scenario == 'script_required')
             assert model.calls == 2 and dispatcher.calls == expected_calls
-        print('Python–Pi local WebSocket: verified one host-owned write and three checkpoint plans')
+        temp.cleanup()
+        print('Python–Pi local WebSocket: verified host write, checkpoint plans and real progress-driven stages')
     finally:
         if ELECTRON:
             server.should_exit = True

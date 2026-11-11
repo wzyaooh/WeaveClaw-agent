@@ -32,7 +32,7 @@ function completion(progress) {
       sketchesReady, sketchesReady, beatsReady && ep.identity_detected === ep.beats,
       beatsReady && ep.video_prompt_present === ep.beats,
       beatsReady && ep.first_frames_present === ep.beats,
-      beatsReady && ep.audio_present === ep.beats,
+      beatsReady && ep.audio_ready === ep.beats,
       beatsReady && ep.video_present === ep.beats, ep.composed, ep.composed,
     ];
     // Count the completed prefix, so stale downstream artifacts cannot hide a
@@ -57,6 +57,8 @@ function facts(result, episode) {
       ep.sketches_missing > ep.beats || ep.sketches_stale > ep.beats || ep.identity_detected > ep.beats || ep.first_frames_present > ep.beats ||
       (ep.video_prompt_present !== undefined && (!count(ep.video_prompt_present) || ep.video_prompt_present > ep.beats)) ||
       (ep.audio_present !== undefined && (!count(ep.audio_present) || ep.audio_present > ep.beats)) ||
+      (ep.audio_ready !== undefined && (!count(ep.audio_ready) || ep.audio_ready > ep.beats ||
+        (ep.audio_present !== undefined && ep.audio_ready < ep.audio_present))) ||
       (ep.video_present !== undefined && (!count(ep.video_present) || ep.video_present > ep.beats)) ||
        (ep.composed !== undefined && typeof ep.composed !== "boolean") ||
        (ep.first_frames_quality !== undefined && typeof ep.first_frames_quality !== "boolean") ||
@@ -68,12 +70,13 @@ function facts(result, episode) {
     ep: { number: ep.number, exists: ep.exists, identity_planned: ep.identity_planned, beats: ep.beats,
       all_beats_have_content: ep.all_beats_have_content, sketches_missing: ep.sketches_missing,
        sketches_stale: ep.sketches_stale, identity_detected: ep.identity_detected, first_frames_present: ep.first_frames_present,
-       first_frames_quality: ep.first_frames_quality !== false,
-       retry_count: ep.retry_count !== undefined ? ep.retry_count : 0,
-      video_prompt_present: ep.video_prompt_present !== undefined ? ep.video_prompt_present : 0,
-      audio_present: ep.audio_present !== undefined ? ep.audio_present : 0,
-      video_present: ep.video_present !== undefined ? ep.video_present : 0,
-      composed: ep.composed === true },
+      first_frames_quality: ep.first_frames_quality ?? null,
+      retry_count: ep.retry_count ?? null,
+      video_prompt_present: ep.video_prompt_present ?? null,
+      audio_present: ep.audio_present ?? null,
+      audio_ready: ep.audio_ready ?? ep.audio_present ?? null,
+      video_present: ep.video_present ?? null,
+      composed: ep.composed ?? null },
     active: new Set(active),
   };
 }
@@ -92,7 +95,7 @@ export function createWorkflow(toolNames, last_episode = null, batch = null) {
       if (!progress || (Object.hasOwn(args, "episode") && args.episode !== progress.ep.number)) return false;
       if (STEPS.get(name) === "sketches") return progress.project.characters > 0;
       if (name === "weaveclaw_compose_episode" || name === "weaveclaw_start_single_video") {
-        return progress.ep.audio_present > 0;
+        return progress.ep.beats > 0 && progress.ep.audio_ready === progress.ep.beats;
       }
       return true;
     },
@@ -124,7 +127,7 @@ export function createWorkflow(toolNames, last_episode = null, batch = null) {
         const identitiesDetected = sketchesReady && ep.identity_detected === ep.beats;
         const videoPromptsReady = ep.beats > 0 && ep.video_prompt_present === ep.beats;
         const framesReady = ep.beats > 0 && ep.first_frames_present === ep.beats;
-        const audioReady = ep.beats > 0 && ep.audio_present === ep.beats;
+        const audioReady = ep.beats > 0 && ep.audio_ready === ep.beats;
         const videoReady = ep.beats > 0 && ep.video_present === ep.beats;
         permit("weaveclaw_detect_sketch_identities", sketchesReady);
         permit("weaveclaw_optimize_video_global", identitiesDetected);
@@ -150,14 +153,18 @@ export function createWorkflow(toolNames, last_episode = null, batch = null) {
         else if (ep.sketches_stale > 0) [reason, checkpoint] = ["sketches_stale", true];
         else if (!sketchesReady) [reason, next] = ["sketches_required", "weaveclaw_generate_sketches"];
         else if (ep.identity_detected !== ep.beats) [reason, next] = ["identity_detection_required", "weaveclaw_detect_sketch_identities"];
+        else if (ep.video_prompt_present === null) reason = null;
         else if (!videoPromptsReady) [reason, next] = ["global_optimize_required", "weaveclaw_optimize_video_global"];
          else if (!framesReady) [reason, next] = ["first_frames_required", "weaveclaw_render_first_frames"];
          // The host owns the retry counter; repeated planning cannot spend it.
-         else if (!ep.first_frames_quality && ep.retry_count === 0) [reason, next, checkpoint] = ["quality_retry", "weaveclaw_render_first_frames", true];
-         else if (!audioReady && !ep.first_frames_quality && ep.retry_count >= 1) [reason, next] = ["audio_required", "weaveclaw_generate_audio"];
-        else if (!audioReady && ep.audio_present > 0) [reason, next] = ["audio_required", "weaveclaw_generate_audio"];
+         else if (ep.first_frames_quality === false && ep.retry_count === 0) [reason, next, checkpoint] = ["quality_retry", "weaveclaw_render_first_frames", true];
+         else if (ep.audio_ready === null) reason = null;
+         else if (!audioReady && ep.first_frames_quality === false && ep.retry_count >= 1) [reason, next] = ["audio_required", "weaveclaw_generate_audio"];
+        else if (!audioReady && ep.audio_ready > 0) [reason, next] = ["audio_required", "weaveclaw_generate_audio"];
         else if (!audioReady) [reason, checkpoint] = ["review_first_frames", true];
+        else if (ep.video_present === null) reason = null;
         else if (!videoReady) [reason, next] = ["video_required", "weaveclaw_start_single_video"];
+        else if (ep.composed === null) reason = null;
         else if (!ep.composed) [reason, next] = ["compose_required", "weaveclaw_compose_episode"];
         else [reason, next] = ["delivery", "weaveclaw_get_final_video"];
       }
