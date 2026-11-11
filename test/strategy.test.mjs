@@ -69,11 +69,8 @@ test("each step delivers its own artifact via host display tools", () => {
   assert.ok(creation.text.includes("草图→展示草图"));
   assert.ok(creation.text.includes("音频→展示音频"));
   assert.ok(creation.text.includes("媒体展示调用对应展示工具"));
-  assert.ok(creation.text.includes("plan() 的 progress"));
-  assert.ok(creation.text.includes("第3步/共14步，21%"));
-  assert.ok(creation.text.includes("step 表示已完成步骤数"));
-  assert.ok(creation.text.includes("任务已启动不算完成"));
-  assert.ok(creation.text.includes("首帧检查点不增加步数"));
+  assert.ok(creation.text.includes("仅在宿主提供可靠的进度统计时"));
+  assert.ok(creation.text.includes("不猜测数字"));
 });
 
 test("grounding and delivery red lines stay pinned", () => {

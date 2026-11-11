@@ -64,7 +64,7 @@ function facts(result, episode) {
       !Array.isArray(active) || active.some((item) => !ACTIVE.has(item)) || new Set(active).size !== active.length) return null;
   return {
     source: { uploads: source.uploads, imported: source.imported },
-    project: { characters: project.characters, episodes: project.episodes, configured: project.configured === true },
+    project: { characters: project.characters, episodes: project.episodes, configured: project.configured ?? null },
     ep: { number: ep.number, exists: ep.exists, identity_planned: ep.identity_planned, beats: ep.beats,
       all_beats_have_content: ep.all_beats_have_content, sketches_missing: ep.sketches_missing,
        sketches_stale: ep.sketches_stale, identity_detected: ep.identity_detected, first_frames_present: ep.first_frames_present,
@@ -140,7 +140,7 @@ export function createWorkflow(toolNames, last_episode = null, batch = null) {
         else if (!source.imported) [reason, next] = ["ingest_required", "weaveclaw_start_ingest"];
         else if (!project.characters) [reason, next] = ["characters_required", "weaveclaw_build_characters"];
         // Optional recommendation only; existing pipeline tools stay available.
-        else if (!project.configured) [reason, checkpoint] = ["config_recommendation", true];
+        else if (project.configured === false) [reason, checkpoint] = ["config_recommendation", true];
         else if (!project.episodes) [reason, next] = ["episodes_required", "weaveclaw_plan_episodes"];
         else if (!ep.exists) reason = null;
         else if (!ep.identity_planned) [reason, next] = ["identity_plan_required", "weaveclaw_plan_identities"];

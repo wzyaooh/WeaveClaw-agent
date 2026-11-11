@@ -207,7 +207,8 @@ export function createTurn(input) {
       try {
         if (signal?.aborted) throw new Error("aborted");
         const proposal = workflow.plan();
-        const result = await request("model.call", { context: projection.project(context.messages), ...proposal }, signal);
+        // Protocol v2 sends only host-validated references and plan fields. Progress and batch remain local.
+        const result = await request("model.call", { context: projection.project(context.messages), tools: proposal.tools, plan: proposal.plan }, signal);
         if (signal?.aborted) throw new Error("aborted");
         const content = contentFromHost(result?.parts, new Set(proposal.tools));
         // Reject invalid, duplicated or SDK-coerced calls before the first tool.

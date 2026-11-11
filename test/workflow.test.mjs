@@ -236,28 +236,36 @@ test("只有一个流水线工具满足前置时仅暴露该写工具，读取�
   assert.equal(proposal.plan.next_tool, "weaveclaw_start_ingest");
 });
 
-test("摄入完成且配置未设置或字段缺失时给出非阻断推荐", () => {
-  for (const configured of [false, undefined]) {
-    const workflow = createWorkflow(names), data = initial();
-    data.source.imported = true;
-    data.project.characters = 2;
-    if (configured === undefined) delete data.project.configured;
-    else data.project.configured = configured;
-    observe(workflow, data);
-    const proposal = workflow.plan();
-    assert.deepEqual(proposal.plan, {
-      episode: 1, next_tool: null, reason: "config_recommendation", checkpoint: true,
-    });
-    assert.deepEqual(workflow.plan(), proposal);
-    assert.deepEqual(proposal.progress, { step: 2, total: 14, percent: 14 });
-    assert.ok(proposal.tools.includes("weaveclaw_build_characters"));
-    assert.ok(proposal.tools.includes("weaveclaw_plan_episodes"));
-    assert.equal(workflow.allows("weaveclaw_plan_episodes", { episode: 1 }), true);
-    // Awaiting a task takes priority over optional recommendations.
-    data.active_steps = ["episodes"];
-    observe(workflow, data);
-    assert.equal(workflow.plan().plan.reason, "await_task");
-  }
+test("摄入完成且配置明确未设置时给出非阻断推荐", () => {
+  const workflow = createWorkflow(names), data = initial();
+  data.source.imported = true;
+  data.project.characters = 2;
+  data.project.configured = false;
+  observe(workflow, data);
+  const proposal = workflow.plan();
+  assert.deepEqual(proposal.plan, {
+    episode: 1, next_tool: null, reason: "config_recommendation", checkpoint: true,
+  });
+  assert.deepEqual(workflow.plan(), proposal);
+  assert.deepEqual(proposal.progress, { step: 2, total: 14, percent: 14 });
+  assert.ok(proposal.tools.includes("weaveclaw_build_characters"));
+  assert.ok(proposal.tools.includes("weaveclaw_plan_episodes"));
+  assert.equal(workflow.allows("weaveclaw_plan_episodes", { episode: 1 }), true);
+  // Awaiting a task takes priority over optional recommendations.
+  data.active_steps = ["episodes"];
+  observe(workflow, data);
+  assert.equal(workflow.plan().plan.reason, "await_task");
+});
+
+test("缺少配置事实时不推断未配置", () => {
+  const workflow = createWorkflow(names), data = initial();
+  data.source.imported = true;
+  data.project.characters = 1;
+  delete data.project.configured;
+  observe(workflow, data);
+  assert.deepEqual(workflow.plan().plan, {
+    episode: 1, next_tool: "weaveclaw_plan_episodes", reason: "episodes_required",
+  });
 });
 
 test("配置已设置时恢复正常流水线，配置改变仅在刷新后生效", () => {
