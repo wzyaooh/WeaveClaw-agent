@@ -42,7 +42,7 @@ function completion(progress) {
       ep.identity_planned, beatsReady && ep.all_beats_have_content,
       sketchesReady, sketchesReady, beatsReady && ep.identity_detected === ep.beats,
       beatsReady && ep.video_prompt_present === ep.beats,
-      beatsReady && ep.first_frames_present === ep.beats && ep.first_frames_quality !== false,
+      beatsReady && ep.first_frames_present === ep.beats && (ep.first_frames_quality !== false || ep.first_frames_user_accepted),
       beatsReady && ep.audio_current !== null && ep.audio_current + ep.audio_confirmed === ep.beats,
       beatsReady && ep.video_current !== null && ep.video_current + ep.video_confirmed === ep.beats,
       ep.composed_freshness === "current" || ep.composition_confirmed,
@@ -89,6 +89,8 @@ function facts(result, episode) {
       (ep.composed_freshness !== undefined && ep.composed !== undefined &&
         (ep.composed_freshness === "missing") === ep.composed) ||
        (ep.first_frames_quality !== undefined && typeof ep.first_frames_quality !== "boolean") ||
+       (ep.first_frames_user_accepted !== undefined && (typeof ep.first_frames_user_accepted !== "boolean" ||
+         (ep.first_frames_user_accepted && ep.first_frames_quality !== false))) ||
        (ep.retry_count !== undefined && !count(ep.retry_count)) ||
       !Array.isArray(active) || active.some((item) => !ACTIVE.has(item)) || new Set(active).size !== active.length) return null;
   return {
@@ -98,6 +100,7 @@ function facts(result, episode) {
       all_beats_have_content: ep.all_beats_have_content, sketches_missing: ep.sketches_missing,
        sketches_stale: ep.sketches_stale, identity_detected: ep.identity_detected, first_frames_present: ep.first_frames_present,
       first_frames_quality: ep.first_frames_quality ?? null,
+      first_frames_user_accepted: ep.first_frames_user_accepted === true,
       retry_count: ep.retry_count ?? null,
       video_prompt_present: ep.video_prompt_present ?? null,
       audio_present: ep.audio_present ?? null,
@@ -176,7 +179,7 @@ export function createWorkflow(toolNames, last_episode = null, batch = null, sco
         progressProject = progress && typeof args?.project_id === "string" ? args.project_id : null;
         recommendationContext = null;
         recommendations = null;
-        if (range && progress && progress.active.size === 0 && !["running", "failed", "cancelled"].includes(progress.source.ingest) && completion(progress).step === STEPS.size && (!batch.quality_required || progress.ep.first_frames_quality === true)) {
+        if (range && progress && progress.active.size === 0 && !["running", "failed", "cancelled"].includes(progress.source.ingest) && completion(progress).step === STEPS.size && (!batch.quality_required || progress.ep.first_frames_quality === true || progress.ep.first_frames_user_accepted)) {
           current++;
           if (current <= range.end) progress = null;
         }
@@ -218,16 +221,17 @@ export function createWorkflow(toolNames, last_episode = null, batch = null, sco
         const identitiesDetected = sketchesReady && ep.identity_detected === ep.beats;
         const videoPromptsReady = ep.beats > 0 && ep.video_prompt_present === ep.beats;
         const framesReady = ep.beats > 0 && ep.first_frames_present === ep.beats;
+        const qualityUsable = ep.first_frames_quality !== false || ep.first_frames_user_accepted;
         if (batch?.quality_required && framesReady && ep.first_frames_quality === null) allowed.add("weaveclaw_verify_first_frames");
         const audioReady = ep.beats > 0 && ep.audio_current !== null && ep.audio_current + ep.audio_confirmed === ep.beats;
         const videoReady = ep.beats > 0 && ep.video_current !== null && ep.video_current + ep.video_confirmed === ep.beats;
         permit("weaveclaw_detect_sketch_identities", sketchesReady);
         permit("weaveclaw_optimize_video_global", identitiesDetected);
         permit("weaveclaw_render_first_frames", identitiesDetected && videoPromptsReady);
-        permit("weaveclaw_generate_audio", framesReady && ep.first_frames_quality !== false);
-        permit("weaveclaw_start_single_video", framesReady && ep.first_frames_quality !== false && audioReady);
-        permit("weaveclaw_compose_episode", framesReady && ep.first_frames_quality !== false && audioReady && videoReady);
-        permit("weaveclaw_get_final_video", ep.first_frames_quality !== false && audioReady && videoReady && (ep.composed_freshness === "current" || ep.composition_confirmed));
+        permit("weaveclaw_generate_audio", framesReady && qualityUsable);
+        permit("weaveclaw_start_single_video", framesReady && qualityUsable && audioReady);
+        permit("weaveclaw_compose_episode", framesReady && qualityUsable && audioReady && videoReady);
+        permit("weaveclaw_get_final_video", qualityUsable && audioReady && videoReady && (ep.composed_freshness === "current" || ep.composition_confirmed));
         // Resume from the first missing prerequisite in fresh facts, not from
         // a session-local cursor; completed stages must not be suggested again.
         if (last_episode === ep.number && !ep.exists) [reason, checkpoint] = ["episode_missing", true];
@@ -251,8 +255,8 @@ export function createWorkflow(toolNames, last_episode = null, batch = null, sco
          else if (!framesReady) [reason, next] = ["first_frames_required", "weaveclaw_render_first_frames"];
          else if (batch?.quality_required && ep.first_frames_quality === null) [reason, next] = ["quality_verify_required", "weaveclaw_verify_first_frames"];
          // The host owns the retry counter; repeated planning cannot spend it.
-         else if (ep.first_frames_quality === false && ep.retry_count === 0) [reason, next, checkpoint] = ["quality_retry", "weaveclaw_render_first_frames", true];
-         else if (ep.first_frames_quality === false) [reason, checkpoint] = ["quality_failed", true];
+         else if (!qualityUsable && ep.retry_count === 0) [reason, next, checkpoint] = ["quality_retry", "weaveclaw_render_first_frames", true];
+         else if (!qualityUsable) [reason, checkpoint] = ["quality_failed", true];
          else if (ep.audio_current === null || ep.audio_unknown > ep.audio_confirmed) [reason, checkpoint] = ["audio_unknown", true];
          else if (ep.audio_stale > 0) [reason, checkpoint] = ["audio_stale", true];
         else if (!audioReady && ep.audio_current > 0) [reason, next] = ["audio_required", "weaveclaw_generate_audio"];

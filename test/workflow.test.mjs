@@ -105,6 +105,17 @@ test("首帧重试耗尽后暂停音频和视频流水线", () => {
   }
 });
 
+test("用户选择使用未通过首帧后可继续，但保留检测失败事实", () => {
+  const workflow = createWorkflow(names), data = qualityProgress();
+  Object.assign(data.episode, { first_frames_quality: false, retry_count: 1, first_frames_user_accepted: true });
+  observe(workflow, data);
+  assert.equal(workflow.plan().plan.reason, "review_first_frames");
+  assert.ok(workflow.plan().tools.includes("weaveclaw_generate_audio"));
+  data.episode.first_frames_quality = true;
+  observe(workflow, data);
+  assert.equal(workflow.plan().plan, null);
+});
+
 test("首帧质量达标或字段缺失时保持原有可选检查点", () => {
   for (const fields of [{}, { first_frames_quality: true, retry_count: 0 }, { first_frames_quality: true, retry_count: 1 }]) {
     const workflow = createWorkflow(names), data = qualityProgress();

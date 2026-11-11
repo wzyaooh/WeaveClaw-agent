@@ -95,10 +95,12 @@ class Dispatcher:
                 data['source']['ingest'] = 'completed'
             elif self.scenario == 'sketches_stale':
                 data['episode'].update(beats=1, all_beats_have_content=True, sketches_stale=1)
-            elif self.scenario in ('quality_retry', 'quality_failed'):
+            elif self.scenario in ('quality_retry', 'quality_failed', 'quality_accepted'):
                 data['episode'].update(beats=1, all_beats_have_content=True, identity_detected=1,
                                        video_prompt_present=1, first_frames_present=1,
                                        first_frames_quality=False, retry_count=0 if self.scenario == 'quality_retry' else 1)
+                if self.scenario == 'quality_accepted':
+                    data['episode']['first_frames_user_accepted'] = True
             return {'ok': True, 'data': data}
         self.write_attempted = True
         return {'ok': True, 'result': 'verified'}
@@ -256,11 +258,11 @@ async def main():
                 if not line:
                     raise RuntimeError('test process failed to start')
         temp = tempfile.TemporaryDirectory()
-        for scenario in ('script_required', 'config_recommendation', 'sketches_stale', 'quality_retry', 'quality_failed',
+        for scenario in ('script_required', 'config_recommendation', 'sketches_stale', 'quality_retry', 'quality_failed', 'quality_accepted',
                          'real_global_optimize_required', 'real_first_frames_required', 'real_audio_required',
                          'real_audio_unknown', 'real_audio_stale', 'real_audio_accepted', 'real_audio_rejected',
                          'real_audio_changed', 'real_await_task', 'real_quality_failed'):
-            expected = {'real_audio_accepted': 'video_required', 'real_audio_rejected': 'audio_unknown',
+            expected = {'quality_accepted': 'audio_unknown', 'real_audio_accepted': 'video_required', 'real_audio_rejected': 'audio_unknown',
                         'real_audio_changed': 'audio_unknown'}.get(scenario, scenario.removeprefix('real_'))
             dispatcher, model = Dispatcher(scenario, Path(temp.name)), Model(expected)
             bindings, events = [], []
