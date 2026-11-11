@@ -25,17 +25,33 @@ test("多个工具前置满足时同时暴露，未满足的下游工具仍隐�
 });
 
 test("并行暴露时 next_tool 推荐首个未完成步骤而非工具列表首项", () => {
-  // Reverse registration order to ensure recommendation follows workflow priority.
-  const workflow = createWorkflow([...names].reverse()), data = initial();
-  data.source.imported = true;
-  data.project.characters = 1;
-  observe(workflow, data);
-  const proposal = workflow.plan();
-  assert.ok(proposal.tools.includes("weaveclaw_build_characters"));
-  assert.ok(proposal.tools.includes("weaveclaw_plan_episodes"));
-  assert.deepEqual(proposal.plan, {
-    episode: 1, next_tool: "weaveclaw_plan_episodes", reason: "episodes_required",
-  });
+  for (const toolNames of [names, [...names].reverse()]) {
+    const workflow = createWorkflow(toolNames), data = initial();
+    data.source.imported = true;
+    data.project.characters = 1;
+    observe(workflow, data);
+    const proposal = workflow.plan();
+    assert.ok(proposal.tools.includes("weaveclaw_build_characters"));
+    assert.ok(proposal.tools.includes("weaveclaw_plan_episodes"));
+    assert.deepEqual(proposal.plan, {
+      episode: 1, next_tool: "weaveclaw_plan_episodes", reason: "episodes_required",
+    });
+
+    // Script and sketch coloring are both unfinished and eligible. Reversing
+    // registration must not recommend coloring ahead of the incomplete script.
+    data.project.episodes = 1;
+    Object.assign(data.episode, {
+      exists: true, identity_planned: true, beats: 2,
+      all_beats_have_content: false, sketches_missing: 2,
+    });
+    observe(workflow, data);
+    const parallel = workflow.plan();
+    assert.ok(parallel.tools.includes("weaveclaw_generate_script"));
+    assert.ok(parallel.tools.includes("weaveclaw_assign_sketch_colors"));
+    assert.deepEqual(parallel.plan, {
+      episode: 1, next_tool: "weaveclaw_generate_script", reason: "script_required",
+    });
+  }
 });
 
 test("只有一个流水线工具满足前置时仅暴露该写工具，读取工具不受影响", () => {
