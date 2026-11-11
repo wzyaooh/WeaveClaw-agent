@@ -19,6 +19,9 @@ const ACTIVE = new Set(STEPS.values());
 // Auxiliary planners are gated but do not add fictitious completion stages.
 const ASSET_PLANNERS = new Set(["weaveclaw_plan_scenes", "weaveclaw_plan_props"]);
 const count = (x) => Number.isSafeInteger(x) && x >= 0;
+// Distinct names for the progress checkpoints; several tools share a task stage.
+const CHECKPOINTS = ["ingest", "characters", "episodes", "identity_plan", "script", "sketch_colors",
+  "sketches", "identity_detection", "global_optimize", "first_frames", "audio", "video", "compose", "delivery"];
 
 function completion(progress) {
   let step = 0;
@@ -221,13 +224,16 @@ export function createWorkflow(toolNames, last_episode = null, batch = null, sco
       }
       const tools = available.filter((name) => (!STEPS.has(name) && !ASSET_PLANNERS.has(name)) || allowed.has(name));
       const feedback = completion(progress);
+      // Only the verified completed prefix is skipped. It is recalculated on
+      // every fresh observation and never infers completion from a write reply.
+      const skipped = CHECKPOINTS.slice(0, feedback.step);
       const target = range ? current : last_episode;
       if (!progress && target !== null && tools.includes("weaveclaw_get_creation_progress")) {
         // last_episode identifies the target only. Read its facts before writes.
-        return { tools, plan: { episode: target, next_tool: "weaveclaw_get_creation_progress", reason: "progress_required" }, progress: feedback, ...batchState };
+        return { tools, plan: { episode: target, next_tool: "weaveclaw_get_creation_progress", reason: "progress_required" }, progress: feedback, skipped, ...batchState };
       }
-      if (next && !tools.includes(next)) return { tools, plan: null, progress: feedback, ...batchState };
-      return { tools, plan: reason ? { episode: progress.ep.number, next_tool: next, reason, ...(checkpoint ? { checkpoint: true } : {}) } : null, progress: feedback, ...batchState };
+      if (next && !tools.includes(next)) return { tools, plan: null, progress: feedback, skipped, ...batchState };
+      return { tools, plan: reason ? { episode: progress.ep.number, next_tool: next, reason, ...(checkpoint ? { checkpoint: true } : {}) } : null, progress: feedback, skipped, ...batchState };
     },
   };
 }
