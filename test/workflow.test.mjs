@@ -39,6 +39,12 @@ test("progress 按最新事实计算已完成工具数与四舍五入百分比",
   data.episode.video_present = 2; expect(12, 86);
   data.episode.composed = true; expect(14, 100);
   assert.equal(workflow.plan().plan.reason, "delivery");
+  // Reading an already composed delivery does not undo completion, whereas
+  // a compose rerun is still an unfinished write even with an old artifact.
+  data.active_steps = ["delivery"]; expect(14, 100);
+  assert.equal(workflow.plan().plan.reason, "await_task");
+  data.active_steps = ["compose"]; expect(12, 86);
+  data.active_steps = [];
   // A newly missing prerequisite must invalidate downstream completion.
   data.episode.sketches_stale = 1; expect(5, 36);
 });
