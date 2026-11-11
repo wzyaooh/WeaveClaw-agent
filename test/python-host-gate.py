@@ -97,7 +97,7 @@ class Dispatcher:
         files = [paths.sketch(n) for n in (1, 2)]
         if stage not in ('global_optimize_required', 'first_frames_required'):
             files += [paths.frame(n) for n in (1, 2)]
-        if stage == 'audio_unknown':
+        if stage in ('audio_unknown', 'audio_accepted', 'audio_rejected', 'audio_changed'):
             files.append(paths.audio(1))
         for path in files:
             path.parent.mkdir(parents=True, exist_ok=True); path.write_bytes(b'fixture')
@@ -132,6 +132,24 @@ class Dispatcher:
                 db.commit()
                 db.execute("UPDATE beats SET narration='new dialogue' WHERE episode_number=2 AND beat_number=1")
                 db.commit()
+        if stage in ('audio_accepted', 'audio_rejected', 'audio_changed'):
+            from novelvideo import creation_repository
+            from novelvideo.services.creation_media_review import decide, inspect
+            from novelvideo.sqlite_store import SQLiteStore
+            store = SQLiteStore('fixture', output_dir=str(output), state_dir=str(state))
+            store._ensure_project_schema_sync()
+            database = state / 'data.db'
+            creation_repository.register(output, database)
+            with closing(sqlite3.connect(database)) as db:
+                db.execute("INSERT INTO episodes(number) VALUES(2)")
+                db.execute("INSERT INTO beats(episode_number,beat_number,narration,audio_type) VALUES(2,1,'dialogue','narration')")
+                db.execute("INSERT INTO beats(episode_number,beat_number,narration,audio_type) VALUES(2,2,'','silence')")
+                db.commit()
+            ctx = SimpleNamespace(project_id='fixture-project', output_dir=output, state_dir=state)
+            [target] = inspect(ctx, 2, beats)
+            decide(ctx, 2, beats, 'audio', 1, target['version'], 'reject' if stage == 'audio_rejected' else 'accept', 'test-user')
+            if stage == 'audio_changed':
+                paths.audio(1).write_bytes(b'replaced')
         episode = SimpleNamespace(identity_ids=['fixture'])
         class Store:
             def get_all_characters(self): return [object()]
@@ -140,9 +158,14 @@ class Dispatcher:
             async def get_beats_as_dicts(self, number): return beats
         ctx = SimpleNamespace(project_id='fixture-project', output_dir=output, state_dir=state)
         result = await creation_progress(ctx, Store(), 2)
-        if stage == 'audio_stale':
+        if stage in ('audio_stale', 'audio_accepted', 'audio_rejected', 'audio_changed'):
             creation_repository._databases.pop(str(output.resolve()), None)
+        if stage == 'audio_stale':
             assert result['episode']['audio_stale'] == 1
+        if stage == 'audio_accepted':
+            assert result['episode']['audio_unknown'] == 1 and result['episode']['audio_confirmed'] == 1
+        if stage in ('audio_rejected', 'audio_changed'):
+            assert result['episode']['audio_unknown'] == 1 and result['episode']['audio_confirmed'] == 0
         return result
 
 async def main():
@@ -180,8 +203,10 @@ async def main():
         temp = tempfile.TemporaryDirectory()
         for scenario in ('script_required', 'config_recommendation', 'sketches_stale', 'quality_retry',
                          'real_global_optimize_required', 'real_first_frames_required', 'real_audio_required',
-                         'real_audio_unknown', 'real_audio_stale', 'real_await_task'):
-            expected = scenario.removeprefix('real_')
+                         'real_audio_unknown', 'real_audio_stale', 'real_audio_accepted', 'real_audio_rejected',
+                         'real_audio_changed', 'real_await_task'):
+            expected = {'real_audio_accepted': 'video_required', 'real_audio_rejected': 'audio_unknown',
+                        'real_audio_changed': 'audio_unknown'}.get(scenario, scenario.removeprefix('real_'))
             dispatcher, model = Dispatcher(scenario, Path(temp.name)), Model(expected)
             bindings = []
             async def bind_strategy(digest):

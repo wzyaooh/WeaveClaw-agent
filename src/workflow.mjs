@@ -32,8 +32,10 @@ function completion(progress) {
       sketchesReady, sketchesReady, beatsReady && ep.identity_detected === ep.beats,
       beatsReady && ep.video_prompt_present === ep.beats,
       beatsReady && ep.first_frames_present === ep.beats,
-      beatsReady && ep.audio_current === ep.beats,
-      beatsReady && ep.video_current === ep.beats, ep.composed_freshness === "current", ep.composed_freshness === "current",
+      beatsReady && ep.audio_current !== null && ep.audio_current + ep.audio_confirmed === ep.beats,
+      beatsReady && ep.video_current !== null && ep.video_current + ep.video_confirmed === ep.beats,
+      ep.composed_freshness === "current" || ep.composition_confirmed,
+      ep.composed_freshness === "current" || ep.composition_confirmed,
     ];
     // Count the completed prefix, so stale downstream artifacts cannot hide a
     // missing prerequisite. Delivery is 100% once the final artifact is ready.
@@ -67,6 +69,10 @@ function facts(result, episode) {
         (ep.audio_present !== undefined && ep.audio_ready < ep.audio_present))) ||
       (ep.video_present !== undefined && (!count(ep.video_present) || ep.video_present > ep.beats)) ||
       (ep.composed !== undefined && typeof ep.composed !== "boolean") || invalidFreshness ||
+      (ep.audio_confirmed !== undefined && (!count(ep.audio_confirmed) || ep.audio_unknown === undefined || ep.audio_confirmed > ep.audio_unknown)) ||
+      (ep.video_confirmed !== undefined && (!count(ep.video_confirmed) || ep.video_unknown === undefined || ep.video_confirmed > ep.video_unknown)) ||
+      (ep.composition_confirmed !== undefined && (typeof ep.composition_confirmed !== "boolean" ||
+        (ep.composition_confirmed && ep.composed_freshness !== "unknown"))) ||
       (ep.composed_freshness !== undefined && !["missing", "current", "stale", "unknown"].includes(ep.composed_freshness)) ||
       (ep.composed_freshness !== undefined && ep.composed !== undefined &&
         (ep.composed_freshness === "missing") === ep.composed) ||
@@ -88,6 +94,8 @@ function facts(result, episode) {
       audio_current: ep.audio_current ?? null, audio_stale: ep.audio_stale ?? null, audio_unknown: ep.audio_unknown ?? null,
       video_current: ep.video_current ?? null, video_stale: ep.video_stale ?? null, video_unknown: ep.video_unknown ?? null,
       composed_freshness: ep.composed_freshness ?? null,
+      audio_confirmed: ep.audio_confirmed ?? 0, video_confirmed: ep.video_confirmed ?? 0,
+      composition_confirmed: ep.composition_confirmed === true,
       composed: ep.composed ?? null },
     active: new Set(active),
   };
@@ -107,11 +115,14 @@ export function createWorkflow(toolNames, last_episode = null, batch = null) {
       if (!progress || (Object.hasOwn(args, "episode") && args.episode !== progress.ep.number)) return false;
       if (STEPS.get(name) === "sketches") return progress.project.characters > 0;
       if (name === "weaveclaw_get_final_video") return progress.ep.beats > 0 &&
-        progress.ep.audio_current === progress.ep.beats && progress.ep.video_current === progress.ep.beats &&
-        progress.ep.composed_freshness === "current";
+        progress.ep.audio_current !== null && progress.ep.audio_current + progress.ep.audio_confirmed === progress.ep.beats &&
+        progress.ep.video_current !== null && progress.ep.video_current + progress.ep.video_confirmed === progress.ep.beats &&
+        (progress.ep.composed_freshness === "current" || progress.ep.composition_confirmed);
       if (name === "weaveclaw_compose_episode" || name === "weaveclaw_start_single_video") {
-        return progress.ep.beats > 0 && progress.ep.audio_current === progress.ep.beats &&
-          (name !== "weaveclaw_compose_episode" || progress.ep.video_current === progress.ep.beats);
+        return progress.ep.beats > 0 && progress.ep.audio_current !== null &&
+          progress.ep.audio_current + progress.ep.audio_confirmed === progress.ep.beats &&
+          (name !== "weaveclaw_compose_episode" || (progress.ep.video_current !== null &&
+            progress.ep.video_current + progress.ep.video_confirmed === progress.ep.beats));
       }
       return true;
     },
@@ -143,15 +154,15 @@ export function createWorkflow(toolNames, last_episode = null, batch = null) {
         const identitiesDetected = sketchesReady && ep.identity_detected === ep.beats;
         const videoPromptsReady = ep.beats > 0 && ep.video_prompt_present === ep.beats;
         const framesReady = ep.beats > 0 && ep.first_frames_present === ep.beats;
-        const audioReady = ep.beats > 0 && ep.audio_current === ep.beats;
-        const videoReady = ep.beats > 0 && ep.video_current === ep.beats;
+        const audioReady = ep.beats > 0 && ep.audio_current !== null && ep.audio_current + ep.audio_confirmed === ep.beats;
+        const videoReady = ep.beats > 0 && ep.video_current !== null && ep.video_current + ep.video_confirmed === ep.beats;
         permit("weaveclaw_detect_sketch_identities", sketchesReady);
         permit("weaveclaw_optimize_video_global", identitiesDetected);
         permit("weaveclaw_render_first_frames", identitiesDetected && videoPromptsReady);
         permit("weaveclaw_generate_audio", framesReady);
         permit("weaveclaw_start_single_video", framesReady && audioReady);
         permit("weaveclaw_compose_episode", framesReady && audioReady && videoReady);
-        permit("weaveclaw_get_final_video", audioReady && videoReady && ep.composed_freshness === "current");
+        permit("weaveclaw_get_final_video", audioReady && videoReady && (ep.composed_freshness === "current" || ep.composition_confirmed));
         // Resume from the first missing prerequisite in fresh facts, not from
         // a session-local cursor; completed stages must not be suggested again.
         if (active.size) reason = "await_task";
@@ -174,17 +185,17 @@ export function createWorkflow(toolNames, last_episode = null, batch = null) {
          else if (!framesReady) [reason, next] = ["first_frames_required", "weaveclaw_render_first_frames"];
          // The host owns the retry counter; repeated planning cannot spend it.
          else if (ep.first_frames_quality === false && ep.retry_count === 0) [reason, next, checkpoint] = ["quality_retry", "weaveclaw_render_first_frames", true];
-         else if (ep.audio_current === null || ep.audio_unknown > 0) [reason, checkpoint] = ["audio_unknown", true];
+         else if (ep.audio_current === null || ep.audio_unknown > ep.audio_confirmed) [reason, checkpoint] = ["audio_unknown", true];
          else if (ep.audio_stale > 0) [reason, checkpoint] = ["audio_stale", true];
          else if (!audioReady && ep.first_frames_quality === false && ep.retry_count >= 1) [reason, next] = ["audio_required", "weaveclaw_generate_audio"];
         else if (!audioReady && ep.audio_current > 0) [reason, next] = ["audio_required", "weaveclaw_generate_audio"];
         else if (!audioReady) [reason, checkpoint] = ["review_first_frames", true];
-        else if (ep.video_current === null || ep.video_unknown > 0) [reason, checkpoint] = ["video_unknown", true];
+        else if (ep.video_current === null || ep.video_unknown > ep.video_confirmed) [reason, checkpoint] = ["video_unknown", true];
         else if (ep.video_stale > 0) [reason, checkpoint] = ["video_stale", true];
         else if (!videoReady) [reason, next] = ["video_required", "weaveclaw_start_single_video"];
         else if (ep.composed === null) reason = null;
         else if (!ep.composed) [reason, next] = ["compose_required", "weaveclaw_compose_episode"];
-        else if (ep.composed_freshness === null || ep.composed_freshness === "unknown") [reason, checkpoint] = ["composition_unknown", true];
+        else if (ep.composed_freshness === null || (ep.composed_freshness === "unknown" && !ep.composition_confirmed)) [reason, checkpoint] = ["composition_unknown", true];
         else if (ep.composed_freshness === "stale") [reason, checkpoint] = ["composition_stale", true];
         else [reason, next] = ["delivery", "weaveclaw_get_final_video"];
       }

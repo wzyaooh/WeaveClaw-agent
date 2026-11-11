@@ -847,6 +847,26 @@ test("过期或未知素材不能解锁视频、合成或交付", () => {
   }
 });
 
+test("用户确认的未知素材可继续，但保持未知来源且拒绝无效确认数量", () => {
+  const workflow = createWorkflow(names), data = qualityProgress();
+  Object.assign(data.episode, {
+    audio_present: 2, audio_current: 1, audio_stale: 0, audio_unknown: 1, audio_confirmed: 1,
+    video_present: 2, video_current: 1, video_stale: 0, video_unknown: 1, video_confirmed: 1,
+    composed: true, composed_freshness: "unknown", composition_confirmed: true,
+  });
+  observe(workflow, data);
+  assert.equal(workflow.plan().plan.reason, "delivery");
+  assert.equal(workflow.allows("weaveclaw_get_final_video", { episode: 1 }), true);
+  assert.equal(data.episode.composed_freshness, "unknown");
+  data.episode.audio_confirmed = 0;
+  observe(workflow, data);
+  assert.equal(workflow.plan().plan.reason, "audio_unknown");
+  assert.equal(workflow.allows("weaveclaw_get_final_video", { episode: 1 }), false);
+  data.episode.audio_confirmed = 2;
+  observe(workflow, data);
+  assert.equal(workflow.plan().plan, null);
+});
+
 test("静音镜头计入音频就绪但不伪造音频文件", () => {
   const workflow = createWorkflow(names), data = qualityProgress();
   Object.assign(data.episode, { audio_present: 1, audio_ready: 2 });
