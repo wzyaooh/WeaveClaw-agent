@@ -46,7 +46,7 @@ test("turn reads target progress before showing the eligible creative write", as
   const host = { async request(kind, payload) {
     requests.push({ kind, payload });
     if (kind === "tool.call" && payload.name === progress.name) return { ok: true, final: false, result: { ok: true, data: {
-      version: 1, source: { uploads: 1, imported: true }, project: { characters: 1, episodes: 1 },
+      version: 1, source: { uploads: 1, imported: true }, project: { characters: 1, episodes: 1, configured: true },
       episode: { number: 1, exists: true, identity_planned: true, beats: 0, all_beats_have_content: false,
         sketches_missing: 0, sketches_stale: 0, identity_detected: 0, first_frames_present: 0 }, active_steps: [],
     } } };

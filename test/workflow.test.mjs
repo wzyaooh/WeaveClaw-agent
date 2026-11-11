@@ -7,11 +7,72 @@ const names = ["weaveclaw_get_creation_progress", "weaveclaw_start_ingest", "wea
   "weaveclaw_assign_sketch_colors", "weaveclaw_generate_sketches", "weaveclaw_detect_sketch_identities",
   "weaveclaw_optimize_video_global", "weaveclaw_render_first_frames", "weaveclaw_generate_audio",
   "weaveclaw_start_single_video", "weaveclaw_compose_episode", "weaveclaw_get_final_video", "read_other"];
-const initial = () => ({ version: 1, source: { uploads: 0, imported: false }, project: { characters: 0, episodes: 0 },
+const initial = () => ({ version: 1, source: { uploads: 0, imported: false }, project: { characters: 0, episodes: 0, configured: true },
   episode: { number: 1, exists: false, identity_planned: false, beats: 0, all_beats_have_content: false,
     sketches_missing: 0, sketches_stale: 0, identity_detected: 0, first_frames_present: 0 }, active_steps: [] });
 const observe = (workflow, data) => workflow.observe("weaveclaw_get_creation_progress", { episode: 1 },
   { ok: true, final: false, result: { ok: true, data } });
+
+test("摄入完成且配置未设置或字段缺失时给出非阻断推荐", () => {
+  for (const configured of [false, undefined]) {
+    const workflow = createWorkflow(names), data = initial();
+    data.source.imported = true;
+    data.project.characters = 2;
+    if (configured === undefined) delete data.project.configured;
+    else data.project.configured = configured;
+    observe(workflow, data);
+    const proposal = workflow.plan();
+    assert.deepEqual(proposal.plan, {
+      episode: 1, next_tool: null, reason: "config_recommendation", checkpoint: true,
+    });
+    assert.deepEqual(workflow.plan(), proposal);
+    assert.deepEqual(proposal.progress, { step: 2, total: 14, percent: 14 });
+    assert.ok(proposal.tools.includes("weaveclaw_build_characters"));
+    assert.ok(proposal.tools.includes("weaveclaw_plan_episodes"));
+    assert.equal(workflow.allows("weaveclaw_plan_episodes", { episode: 1 }), true);
+    // Awaiting a task takes priority over optional recommendations.
+    data.active_steps = ["episodes"];
+    observe(workflow, data);
+    assert.equal(workflow.plan().plan.reason, "await_task");
+  }
+});
+
+test("配置已设置时恢复正常流水线，配置改变仅在刷新后生效", () => {
+  const workflow = createWorkflow(names), data = initial();
+  data.source.imported = true;
+  data.project.characters = 1;
+  data.project.configured = false;
+  observe(workflow, data);
+  data.project.configured = true;
+  assert.equal(workflow.plan().plan.reason, "config_recommendation");
+  observe(workflow, data);
+  assert.deepEqual(workflow.plan().plan, {
+    episode: 1, next_tool: "weaveclaw_plan_episodes", reason: "episodes_required",
+  });
+});
+
+test("摄入或角色前置未满足时不提前推荐配置", () => {
+  const workflow = createWorkflow(names), data = initial();
+  data.project.configured = false;
+  data.source.uploads = 1;
+  observe(workflow, data);
+  assert.equal(workflow.plan().plan.reason, "ingest_required");
+  data.source.imported = true;
+  observe(workflow, data);
+  assert.equal(workflow.plan().plan.reason, "characters_required");
+});
+
+test("configured 非布尔值使进度失效而非误判已配置", () => {
+  for (const configured of [null, 0, 1, "true", "false", {}]) {
+    const workflow = createWorkflow(names), data = initial();
+    data.source.imported = true;
+    data.project.characters = 1;
+    data.project.configured = configured;
+    observe(workflow, data);
+    assert.equal(workflow.plan().plan, null);
+    assert.deepEqual(workflow.plan().tools, [names[0], "read_other"]);
+  }
+});
 
 test("progress 按最新事实计算已完成工具数与四舍五入百分比", () => {
   const workflow = createWorkflow(names), data = initial();
@@ -51,7 +112,7 @@ test("progress 按最新事实计算已完成工具数与四舍五入百分比",
 
 test("执行中不计为完成，刷新失败清空进度，重连从事实恢复", () => {
   const data = initial(), workflow = createWorkflow(names, 1);
-  Object.assign(data, { source: { uploads: 1, imported: true }, project: { characters: 1, episodes: 1 } });
+  Object.assign(data, { source: { uploads: 1, imported: true }, project: { characters: 1, episodes: 1, configured: true } });
   Object.assign(data.episode, { exists: true, identity_planned: true, beats: 2, all_beats_have_content: true, sketches_missing: 2 });
   data.active_steps = ["script"];
   observe(workflow, data);
@@ -241,7 +302,7 @@ test("刷新发现所有步骤均已完成时 plan 返回 delivery", () => {
 
 test("恢复时已有任务只等待，进度刷新失败则重新读取而不沿用旧断点", () => {
   const workflow = createWorkflow(names, 1), data = initial();
-  Object.assign(data, { source: { uploads: 1, imported: true }, project: { characters: 2, episodes: 1 } });
+  Object.assign(data, { source: { uploads: 1, imported: true }, project: { characters: 2, episodes: 1, configured: true } });
   Object.assign(data.episode, { exists: true, identity_planned: true });
   data.active_steps = ["script"];
   observe(workflow, data);
@@ -314,7 +375,7 @@ test("workflow suggests stages and exposes writes only after prerequisites", () 
 
 test("草图旧批次产生可选警告且不新增工具阻断，新批次恢复正常建议", () => {
   const workflow = createWorkflow(names), data = initial();
-  Object.assign(data, { source: { uploads: 1, imported: true }, project: { characters: 1, episodes: 1 } });
+  Object.assign(data, { source: { uploads: 1, imported: true }, project: { characters: 1, episodes: 1, configured: true } });
   Object.assign(data.episode, {
     exists: true, identity_planned: true, beats: 2, all_beats_have_content: true,
     sketches_stale: 1, identity_detected: 2, video_prompt_present: 2,
@@ -368,7 +429,7 @@ test("second-half pipeline gates audio, video and compose behind prior stages", 
   // Set up a fully-ready-for-audio episode (through global_optimize + first_frames).
   Object.assign(data, {
     source: { uploads: 1, imported: true },
-    project: { characters: 2, episodes: 1 },
+    project: { characters: 2, episodes: 1, configured: true },
   });
   Object.assign(data.episode, {
     exists: true, identity_planned: true, beats: 3, all_beats_have_content: true,
@@ -411,7 +472,7 @@ test("new fields are optional and default to 0 when absent from progress respons
   const workflow = createWorkflow(names), data = initial();
   Object.assign(data, {
     source: { uploads: 1, imported: true },
-    project: { characters: 1, episodes: 1 },
+    project: { characters: 1, episodes: 1, configured: true },
   });
   Object.assign(data.episode, {
     exists: true, identity_planned: true, beats: 2, all_beats_have_content: true,
@@ -441,7 +502,7 @@ test("review_first_frames 可选检查点在首帧就绪后出现且不阻断流
   const workflow = createWorkflow([...names, "weaveclaw_review_first_frames"]), data = initial();
   // 未登记进 STEPS 的工具（如审查读工具）不受流水线门控，授权由宿主负责
   assert.equal(workflow.allows("weaveclaw_review_first_frames", {}), true);
-  Object.assign(data, { source: { uploads: 1, imported: true }, project: { characters: 1, episodes: 1 } });
+  Object.assign(data, { source: { uploads: 1, imported: true }, project: { characters: 1, episodes: 1, configured: true } });
   Object.assign(data.episode, {
     exists: true, identity_planned: true, beats: 2, all_beats_have_content: true,
     sketches_missing: 0, sketches_stale: 0, identity_detected: 2,
@@ -464,7 +525,7 @@ test("review_first_frames 可选检查点在首帧就绪后出现且不阻断流
 
 test("跳过首帧审查后链路自动进入 audio_required", () => {
   const workflow = createWorkflow(names), data = initial();
-  Object.assign(data, { source: { uploads: 1, imported: true }, project: { characters: 1, episodes: 1 } });
+  Object.assign(data, { source: { uploads: 1, imported: true }, project: { characters: 1, episodes: 1, configured: true } });
   Object.assign(data.episode, {
     exists: true, identity_planned: true, beats: 2, all_beats_have_content: true,
     sketches_missing: 0, sketches_stale: 0, identity_detected: 2,
@@ -480,7 +541,7 @@ test("跳过首帧审查后链路自动进入 audio_required", () => {
 
 test("后半程 reason 节点按链路顺序依次出现", () => {
   const workflow = createWorkflow(names), data = initial();
-  Object.assign(data, { source: { uploads: 1, imported: true }, project: { characters: 1, episodes: 1 } });
+  Object.assign(data, { source: { uploads: 1, imported: true }, project: { characters: 1, episodes: 1, configured: true } });
   Object.assign(data.episode, {
     exists: true, identity_planned: true, beats: 2, all_beats_have_content: true,
     sketches_missing: 0, sketches_stale: 0, identity_detected: 2,
@@ -505,7 +566,7 @@ test("后半程 reason 节点按链路顺序依次出现", () => {
 
 test("新字段缺省时默认为 0 或 false 并照常参与门槛计算", () => {
   const workflow = createWorkflow(names), data = initial();
-  Object.assign(data, { source: { uploads: 1, imported: true }, project: { characters: 1, episodes: 1 } });
+  Object.assign(data, { source: { uploads: 1, imported: true }, project: { characters: 1, episodes: 1, configured: true } });
   Object.assign(data.episode, {
     exists: true, identity_planned: true, beats: 2, all_beats_have_content: true,
     sketches_missing: 0, sketches_stale: 0, identity_detected: 2,
@@ -529,7 +590,7 @@ test("新字段缺省时默认为 0 或 false 并照常参与门槛计算", () =
 
 test("新字段边界值 0 与等于 beats 均可通过校验", () => {
   const workflow = createWorkflow(names), data = initial();
-  Object.assign(data, { source: { uploads: 1, imported: true }, project: { characters: 1, episodes: 1 } });
+  Object.assign(data, { source: { uploads: 1, imported: true }, project: { characters: 1, episodes: 1, configured: true } });
   Object.assign(data.episode, {
     exists: true, identity_planned: true, beats: 2, all_beats_have_content: true,
     sketches_missing: 0, sketches_stale: 0, identity_detected: 2,
@@ -577,7 +638,7 @@ test("新字段越界或非法值使目标集进度失效", () => {
 
 test("音频回退为未开始时可选检查点重现", () => {
   const workflow = createWorkflow(names), data = initial();
-  Object.assign(data, { source: { uploads: 1, imported: true }, project: { characters: 1, episodes: 1 } });
+  Object.assign(data, { source: { uploads: 1, imported: true }, project: { characters: 1, episodes: 1, configured: true } });
   Object.assign(data.episode, {
     exists: true, identity_planned: true, beats: 2, all_beats_have_content: true,
     sketches_missing: 0, sketches_stale: 0, identity_detected: 2,

@@ -40,6 +40,14 @@ test("execution modes default to asking the user and cap one write per turn", ()
   assert.ok(creation.text.includes("不轮询到完成"));
 });
 
+test("摄入后按小说内容一次性推荐配置且不覆盖已有选择", () => {
+  for (const keyword of ["摄入完成后", "实际读取的小说内容", "visual_style", "narration_style", "ethnicity", "rhythm",
+    "一次性推荐", "确认或修改", "不擅自覆盖已有配置", "config_recommendation", "可选检查点"]) {
+    assert.ok(creation.text.includes(keyword), `missing recommendation rule: ${keyword}`);
+  }
+  assert.ok(!textOnly.text.includes("config_recommendation"));
+});
+
 test("audio update keeps fixed order across turns", () => {
   const { text } = creation;
   const patch = text.indexOf("先更新 beat 本身");

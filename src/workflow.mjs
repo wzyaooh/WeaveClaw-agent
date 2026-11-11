@@ -50,7 +50,8 @@ function facts(result, episode) {
   const { source, project, episode: ep, active_steps: active } = data || {};
   if (!data || data.version !== 1 || !source || !project || !ep || ep.number !== episode || !Number.isSafeInteger(episode) || episode < 1 || episode > 10000 ||
       !count(source.uploads) || typeof source.imported !== "boolean" ||
-      !count(project.characters) || !count(project.episodes) || typeof ep.exists !== "boolean" ||
+      !count(project.characters) || !count(project.episodes) ||
+      (project.configured !== undefined && typeof project.configured !== "boolean") || typeof ep.exists !== "boolean" ||
       typeof ep.identity_planned !== "boolean" || !count(ep.beats) || typeof ep.all_beats_have_content !== "boolean" ||
       !count(ep.sketches_missing) || !count(ep.sketches_stale) || !count(ep.identity_detected) || !count(ep.first_frames_present) ||
       ep.sketches_missing > ep.beats || ep.sketches_stale > ep.beats || ep.identity_detected > ep.beats || ep.first_frames_present > ep.beats ||
@@ -61,7 +62,7 @@ function facts(result, episode) {
       !Array.isArray(active) || active.some((item) => !ACTIVE.has(item)) || new Set(active).size !== active.length) return null;
   return {
     source: { uploads: source.uploads, imported: source.imported },
-    project: { characters: project.characters, episodes: project.episodes },
+    project: { characters: project.characters, episodes: project.episodes, configured: project.configured === true },
     ep: { number: ep.number, exists: ep.exists, identity_planned: ep.identity_planned, beats: ep.beats,
       all_beats_have_content: ep.all_beats_have_content, sketches_missing: ep.sketches_missing,
       sketches_stale: ep.sketches_stale, identity_detected: ep.identity_detected, first_frames_present: ep.first_frames_present,
@@ -123,6 +124,8 @@ export function createWorkflow(toolNames, last_episode = null) {
         else if (!source.imported && !source.uploads) reason = "source_missing";
         else if (!source.imported) [reason, next] = ["ingest_required", "weaveclaw_start_ingest"];
         else if (!project.characters) [reason, next] = ["characters_required", "weaveclaw_build_characters"];
+        // Optional recommendation only; existing pipeline tools stay available.
+        else if (!project.configured) [reason, checkpoint] = ["config_recommendation", true];
         else if (!project.episodes) [reason, next] = ["episodes_required", "weaveclaw_plan_episodes"];
         else if (!ep.exists) reason = null;
         else if (!ep.identity_planned) [reason, next] = ["identity_plan_required", "weaveclaw_plan_identities"];
