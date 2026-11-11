@@ -168,7 +168,7 @@ test("out-of-range new fields in progress response are rejected", () => {
 
 test("review_first_frames 可选检查点在首帧就绪后出现且不阻断流水线", () => {
   const workflow = createWorkflow([...names, "weaveclaw_review_first_frames"]), data = initial();
-  // 审查读工具是可选检查点能力：任何进度状态下都不受门控
+  // 未登记进 STEPS 的工具（如审查读工具）不受流水线门控，授权由宿主负责
   assert.equal(workflow.allows("weaveclaw_review_first_frames", {}), true);
   Object.assign(data, { source: { uploads: 1, imported: true }, project: { characters: 1, episodes: 1 } });
   Object.assign(data.episode, {
@@ -302,4 +302,19 @@ test("新字段越界或非法值使目标集进度失效", () => {
   assert.deepEqual(workflow.plan(), hidden);
   bad.episode.composed = 1; observe(workflow, bad);
   assert.deepEqual(workflow.plan(), hidden);
+});
+
+test("音频回退为未开始时可选检查点重现", () => {
+  const workflow = createWorkflow(names), data = initial();
+  Object.assign(data, { source: { uploads: 1, imported: true }, project: { characters: 1, episodes: 1 } });
+  Object.assign(data.episode, {
+    exists: true, identity_planned: true, beats: 2, all_beats_have_content: true,
+    sketches_missing: 0, sketches_stale: 0, identity_detected: 2,
+    video_prompt_present: 2, first_frames_present: 2,
+  });
+  data.episode.audio_present = 1; observe(workflow, data);
+  assert.equal(workflow.plan().plan.reason, "audio_required");
+  // 音频重做清空后（audio_present 回退为 0）检查点重现：语义为事实驱动、非一次性标记
+  data.episode.audio_present = 0; observe(workflow, data);
+  assert.deepEqual(workflow.plan().plan, { episode: 1, next_tool: null, reason: "review_first_frames", checkpoint: true });
 });
