@@ -13,6 +13,42 @@ const initial = () => ({ version: 1, source: { uploads: 0, imported: false }, pr
 const observe = (workflow, data) => workflow.observe("weaveclaw_get_creation_progress", { episode: 1 },
   { ok: true, final: false, result: { ok: true, data } });
 
+test("多个工具前置满足时同时暴露，未满足的下游工具仍隐藏", () => {
+  const workflow = createWorkflow(names), data = initial();
+  data.source.imported = true;
+  data.project.characters = 1;
+  observe(workflow, data);
+  assert.deepEqual(workflow.plan().tools, [
+    "weaveclaw_get_creation_progress", "weaveclaw_build_characters",
+    "weaveclaw_plan_episodes", "read_other",
+  ]);
+});
+
+test("并行暴露时 next_tool 推荐首个未完成步骤而非工具列表首项", () => {
+  // Reverse registration order to ensure recommendation follows workflow priority.
+  const workflow = createWorkflow([...names].reverse()), data = initial();
+  data.source.imported = true;
+  data.project.characters = 1;
+  observe(workflow, data);
+  const proposal = workflow.plan();
+  assert.ok(proposal.tools.includes("weaveclaw_build_characters"));
+  assert.ok(proposal.tools.includes("weaveclaw_plan_episodes"));
+  assert.deepEqual(proposal.plan, {
+    episode: 1, next_tool: "weaveclaw_plan_episodes", reason: "episodes_required",
+  });
+});
+
+test("只有一个流水线工具满足前置时仅暴露该写工具，读取工具不受影响", () => {
+  const workflow = createWorkflow(names), data = initial();
+  data.source.uploads = 1;
+  observe(workflow, data);
+  const proposal = workflow.plan();
+  assert.deepEqual(proposal.tools, [
+    "weaveclaw_get_creation_progress", "weaveclaw_start_ingest", "read_other",
+  ]);
+  assert.equal(proposal.plan.next_tool, "weaveclaw_start_ingest");
+});
+
 test("摄入完成且配置未设置或字段缺失时给出非阻断推荐", () => {
   for (const configured of [false, undefined]) {
     const workflow = createWorkflow(names), data = initial();
