@@ -61,7 +61,8 @@ class Model:
         ready = episode['exists'] and episode['beats'] > 0 and episode['all_beats_have_content'] and 'script' not in actual['active_steps']
         assert ({'weaveclaw_plan_scenes', 'weaveclaw_plan_props'} <= {item.name for item in parameters.function_tools}) == ready
         if self.write_tool:
-            return ModelResponse(parts=[ToolCallPart(self.write_tool, {'episode': 2}, 'plan-1')],
+            args = {'episode': 2, **({'beat': 1} if self.write_tool == 'weaveclaw_start_single_video' else {})}
+            return ModelResponse(parts=[ToolCallPart(self.write_tool, args, 'plan-1')],
                                  finish_reason='tool_call', model_name='mock')
         if self.expected_reason != 'script_required':
             return ModelResponse(parts=[TextPart('已收到进度建议')], finish_reason='stop', model_name='mock')
@@ -263,6 +264,38 @@ async def main():
             assert result.write_attempted and model.calls == 2
             assert dispatcher.calls == [('weaveclaw_get_creation_progress', {'episode': 2}), (tool, {'episode': 2})]
         from novelvideo.chat.business_tools import BusinessToolDispatcher, BusinessToolError
+        for changed in (False, True):
+            fixture = Dispatcher('real_resume', Path(temp.name) / f'audio-recheck-{changed}')
+            requests, claim = [], AsyncMock(return_value=True)
+            async def media_request(method, path, *, query=None, body=None):
+                requests.append((method, path))
+                if method == 'GET':
+                    if changed and len(requests) == 2:
+                        # An identical edit still advances the beat revision and
+                        # invalidates the earlier user decision for unknown audio.
+                        with closing(sqlite3.connect(fixture.resume_context[0].state_dir / 'data.db')) as db:
+                            db.execute('UPDATE beats SET narration=narration WHERE episode_number=2 AND beat_number=1')
+                            db.commit()
+                    return {'ok': True, 'data': await fixture.real_progress()}
+                return {'ok': True, 'task_id': 'fixture-task'}
+            dispatcher = BusinessToolDispatcher(project_id='fixture-project', request=media_request,
+                authorize=AsyncMock(), claim_write=claim)
+            model = Model('video_required', write_tool='weaveclaw_start_single_video')
+            with patch('novelvideo.chat.business_tools._plan_allows_tool', return_value=True), \
+                    patch('novelvideo.chat.business_tools.preflight_tool_dependencies'):
+                runtime = OrchestratorRuntime(link=app.state.orchestrator_link, model=model,
+                    dispatcher=dispatcher, stream=False)
+                try:
+                    result = await asyncio.wait_for(runtime.run('generate video', scope='project',
+                        bind_strategy=bind_strategy, history=[{'role': 'user', 'content': 'previous user message'}]), 10)
+                except BusinessToolError as exc:
+                    assert changed and str(exc) == 'media_progress_required'
+                    claim.assert_not_awaited()
+                    assert [method for method, _ in requests] == ['GET', 'GET']
+                else:
+                    assert not changed and result.write_attempted
+                    claim.assert_awaited_once()
+                    assert [method for method, _ in requests] == ['GET', 'GET', 'POST']
         for tool in ('weaveclaw_plan_scenes', 'weaveclaw_plan_props'):
             for changed in (False, True):
                 fixture = Dispatcher('real_resume', Path(temp.name) / f'{tool}-{changed}')
@@ -317,7 +350,7 @@ async def main():
             assert not result.write_attempted and model.calls == 2
             assert messages.last_creation_episode('user', scope, 'principal') == (2 if index < 2 else None)
         temp.cleanup()
-        print('Python–Pi local WebSocket: verified asset planner gates, host recheck, resume and media changes')
+        print('Python–Pi local WebSocket: verified planner gates, audio recheck, resume and media changes')
     finally:
         if ELECTRON:
             server.should_exit = True
