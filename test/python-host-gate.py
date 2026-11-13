@@ -500,6 +500,34 @@ async def main():
                 history=[{'role': 'user', 'content': 'previous user message'}]), 10)
         assert result.write_attempted and model.calls == 2
         claim.assert_awaited_once(); request.assert_awaited_once()
+        # The host must repair a mixed read/write response before sending any
+        # proposal to Pi; the read and the corrected write then run once.
+        class MixedRepairModel(RepairModel):
+            async def request(self, messages, settings, parameters):
+                self.calls += 1
+                if self.calls == 2:
+                    parts = messages[-1].parts
+                    assert len(parts) == 2 and parts[0].content['code'] == 'batch_not_executed'
+                    assert parts[1].content['preflight_only'] is True
+                args = {'episode': 2, 'beat': 1, 'expected_revision': 'a' * 32,
+                        'audio_type': 'bad' if self.calls == 1 else 'narration'}
+                return ModelResponse(parts=[ToolCallPart('weaveclaw_get_project', {}, f'read-{self.calls}'),
+                    ToolCallPart('weaveclaw_update_beat', args, f'edit-{self.calls}')],
+                    finish_reason='tool_call', model_name='mock')
+        async def mixed_request(method, path, *, query=None, body=None):
+            if method == 'GET':
+                return {'ok': True, 'data': {'name': 'fixture'}}
+            assert method == 'PATCH' and body['audio_type'] == 'narration'
+            return {'ok': True, 'data': {'saved': True}}
+        claim, request = AsyncMock(return_value=True), AsyncMock(side_effect=mixed_request)
+        dispatcher = BusinessToolDispatcher(project_id='fixture-project', request=request, authorize=AsyncMock(), claim_write=claim)
+        model = MixedRepairModel()
+        result = await asyncio.wait_for(OrchestratorRuntime(link=app.state.orchestrator_link, model=model,
+            dispatcher=dispatcher, stream=False).run('检查项目并将第一镜头设为旁白', scope='project', bind_strategy=bind_strategy,
+                history=[{'role': 'user', 'content': 'previous user message'}]), 10)
+        assert result.write_attempted and model.calls == 2
+        assert [item.args[0] for item in request.await_args_list] == ['GET', 'PATCH']
+        claim.assert_awaited_once()
         # A saved accepted operation is replayed only for the corrected args.
         claim, request = AsyncMock(), AsyncMock()
         replay = AsyncMock(return_value={'ok': True, 'data': {'saved': True}})
