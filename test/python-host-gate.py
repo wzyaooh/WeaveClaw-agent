@@ -528,6 +528,27 @@ async def main():
         assert result.write_attempted and model.calls == 2
         assert [item.args[0] for item in request.await_args_list] == ['GET', 'PATCH']
         claim.assert_awaited_once()
+        class NestedRepairModel(RepairModel):
+            async def request(self, messages, settings, parameters):
+                self.calls += 1
+                target = {'image_id': 'a' * 32, 'prompt': 'edit picture',
+                          'references': [{'image_id': 'b' * 32, 'role': 'bad' if self.calls == 1 else 'style'}]}
+                return ModelResponse(parts=[ToolCallPart('weaveclaw_edit_chat_images', {'targets': [target]},
+                    f'edit-{self.calls}')], finish_reason='tool_call', model_name='mock')
+        async def nested_request(method, path, *, query=None, body=None):
+            assert method == 'POST' and body['targets'][0]['references'][0]['role'] == 'style'
+            return {'ok': True, 'task_id': 'mock-task'}
+        claim, request = AsyncMock(return_value=True), AsyncMock(side_effect=nested_request)
+        dispatcher = BusinessToolDispatcher(project_id='fixture-project', request=request, authorize=AsyncMock(),
+            claim_write=claim, image_reference_ids=['a' * 32, 'b' * 32])
+        model = NestedRepairModel()
+        with patch('novelvideo.chat.business_tools.preflight_tool_dependencies'):
+            result = await asyncio.wait_for(OrchestratorRuntime(link=app.state.orchestrator_link, model=model,
+                dispatcher=dispatcher, stream=False).run('编辑图片并以另一张作为风格参考', scope='project', bind_strategy=bind_strategy,
+                    history=[{'role': 'user', 'content': 'previous user message'}]), 10)
+        assert result.write_attempted and model.calls == 2
+        claim.assert_awaited_once()
+        request.assert_awaited_once()
         # A saved accepted operation is replayed only for the corrected args.
         claim, request = AsyncMock(), AsyncMock()
         replay = AsyncMock(return_value={'ok': True, 'data': {'saved': True}})
