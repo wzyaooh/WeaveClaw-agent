@@ -74,10 +74,14 @@ test("media requests distinguish prompt writing, standalone images and existing 
   assert.match(text, /未提数量时生成一张/);
   assert.match(text, /明确要求多张但数量不清楚时先问数量，不自行扩大批量/);
   assert.match(text, /没有指定风格时不强加特定风格/);
-  assert.match(text, /独立文生视频、基于素材生成视频和为已有分镜生成视频/);
-  assert.match(text, /不要臆造集数、分镜、首帧或素材/);
-  assert.match(text, /不要借用已有分镜的视频工具代替/);
-  assert.match(text, /宿主实际提供匹配工具且前置满足时调用/);
+  assert.match(text, /独立视频可以是文字、图片或图文音频等用户选择的素材组合/);
+  assert.match(text, /宿主提供 weaveclaw_generate_chat_video 时调用它/);
+  assert.match(text, /不丢弃参考素材改用另一种方式/);
+  assert.match(text, /用户提到参考素材但没有提供或无法确定所指时先追问/);
+  assert.match(text, /依据宿主返回的候选模型提供使用建议/);
+  assert.match(text, /不编造型号，也不自行切换模型/);
+  assert.match(text, /不要臆造集数、分镜或首帧/);
+  assert.match(text, /不要借用已有分镜的视频工具代替独立视频/);
   assert.match(text, /说明当前聊天无法直接执行，并可建议使用画布文生视频入口/);
   assert.match(text, /不声称已提交任务/);
 });
