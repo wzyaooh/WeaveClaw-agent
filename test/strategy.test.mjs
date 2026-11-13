@@ -64,6 +64,24 @@ test("planning and delivery distinguish actions and report observed facts", () =
   assert.match(text, /已提交、执行中、完成、失败和待核对/);
 });
 
+test("media requests distinguish prompt writing, standalone images and existing beat videos", () => {
+  const { text } = creation;
+  assert.match(text, /只写提示词时直接给文本，不调用生成工具/);
+  assert.match(text, /保留用户明确的主体、动作、场景、风格、文字和限制/);
+  assert.match(text, /明确要求从文字生成独立图片时，使用宿主提供的聊天生图工具/);
+  assert.match(text, /不要求已有角色、分镜或集数/);
+  assert.match(text, /遵循宿主工具的默认值/);
+  assert.match(text, /未提数量时生成一张/);
+  assert.match(text, /明确要求多张但数量不清楚时先问数量，不自行扩大批量/);
+  assert.match(text, /没有指定风格时不强加特定风格/);
+  assert.match(text, /独立文生视频、基于素材生成视频和为已有分镜生成视频/);
+  assert.match(text, /不要臆造集数、分镜、首帧或素材/);
+  assert.match(text, /不要借用已有分镜的视频工具代替/);
+  assert.match(text, /宿主实际提供匹配工具且前置满足时调用/);
+  assert.match(text, /说明当前聊天无法直接执行，并可建议使用画布文生视频入口/);
+  assert.match(text, /不声称已提交任务/);
+});
+
 test("摄入后按小说内容一次性推荐配置且不覆盖已有选择", () => {
   for (const keyword of ["摄入完成后", "实际读取的小说内容", "visual_style", "narration_style", "ethnicity", "rhythm",
     "一次性推荐", "确认或修改", "不擅自覆盖已有配置", "config_recommendation", "可选检查点"]) {
