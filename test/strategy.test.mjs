@@ -40,6 +40,30 @@ test("execution modes default to asking the user and cap one write per turn", ()
   assert.ok(creation.text.includes("不轮询到完成"));
 });
 
+test("read-only questions and precise single-step requests do not become broad tasks", () => {
+  const { text } = creation;
+  assert.match(text, /问状态、进度、费用或想看素材时，只读取并回答/);
+  assert.match(text, /明确要求一个具体操作时.*只处理该操作/);
+  assert.match(text, /单纯查询或明确的单步请求不必先选择模式/);
+  assert.match(text, /不把建议当成已获执行授权/);
+});
+
+test("ambiguous continuation and missing targets require evidence or clarification", () => {
+  const { text } = creation;
+  assert.match(text, /仍无法唯一确定时，只问解决当前步骤所需的关键问题/);
+  assert.match(text, /明确的新目标优先于历史和最近集数记忆/);
+  assert.match(text, /多个同等合理的下一步.*没有明确选择或授权自动推进.*请用户选择/);
+  assert.match(text, /进度读取失败或工具不可用时如实说明，不沿用旧进度/);
+});
+
+test("planning and delivery distinguish actions and report observed facts", () => {
+  const { text } = creation;
+  assert.match(text, /生成\/重做.*查看\/预览.*采纳.*导出/);
+  assert.match(text, /生成任务完成不等于用户已采纳或导出/);
+  assert.match(text, /当前状态、影响下一步的前置条件和一个建议的下一步/);
+  assert.match(text, /已提交、执行中、完成、失败和待核对/);
+});
+
 test("摄入后按小说内容一次性推荐配置且不覆盖已有选择", () => {
   for (const keyword of ["摄入完成后", "实际读取的小说内容", "visual_style", "narration_style", "ethnicity", "rhythm",
     "一次性推荐", "确认或修改", "不擅自覆盖已有配置", "config_recommendation", "可选检查点"]) {
